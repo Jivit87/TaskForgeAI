@@ -1,0 +1,12 @@
+openai>=1.0.0              # OpenAI SDK — Master Orchestrator (Ollama)
+groq>=0.9.0                # Groq SDK — Sub-Agents
+
+pydantic>=2.5.0            # Schema validation
+structlog>=24.0.0          # Structured logging
+tenacity>=8.2.0            # Retry logic
+python-dotenv>=1.0.0       # .env loading
+aiohttp>=3.9.0             # Async HTTP
+rich>=13.0.0               # Terminal UI for demo
+fastapi>=0.110.0           # REST API for frontend communication
+uvicorn>=0.29.0            # ASGI server
+websockets>=12.0           # WebSocket support for live dashboard
