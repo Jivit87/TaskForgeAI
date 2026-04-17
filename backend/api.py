@@ -4,16 +4,19 @@ backend/api.py
 FastAPI REST + WebSocket server for the FRAME-MO frontend dashboard.
 
 Endpoints:
-  POST /tasks          — Start a new task
-  GET  /tasks          — List all checkpointed tasks
-  GET  /tasks/{id}     — Get live status of a task
-  POST /tasks/{id}/hitl — Submit HITL approval decision
-  WS   /ws/{id}        — WebSocket stream for live agent updates
-  GET  /mcp/health     — MCP server health status
+  POST /tasks               — Start a new task
+  GET  /tasks               — List all checkpointed tasks
+  GET  /tasks/{id}          — Get live status of a task
+  POST /tasks/{id}/hitl     — Submit HITL approval decision
+  GET  /tasks/{id}/hitl/pending — Get pending HITL requests for a task
+  WS   /ws/{id}             — WebSocket stream for live agent updates
+  GET  /mcp/health          — MCP server health status
+  GET  /health              — API liveness check
 """
 
 import asyncio
 import json
+import uuid
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -87,6 +90,10 @@ class HITLDecisionRequest(BaseModel):
 
 @app.post("/tasks", summary="Start a new agent task")
 async def start_task(req: StartTaskRequest):
+    # Generate the task_id upfront so the client can subscribe to the correct
+    # WebSocket channel BEFORE the orchestrator begins running.
+    task_id = req.task_id or str(uuid.uuid4())[:8]
+
     inject = {}
     if req.inject_failure:
         for item in req.inject_failure.split(","):
@@ -100,19 +107,16 @@ async def start_task(req: StartTaskRequest):
         inject_failures=inject,
     )
 
-    task_id = req.task_id or None
-
     async def _run_and_broadcast():
         try:
             result = await orch.run(goal=req.goal, task_id=task_id)
-            actual_id = result.get("task_id")
-            await _broadcast(actual_id, {"event": "complete", "result": result})
+            await _broadcast(task_id, {"event": "complete", "result": result})
         except Exception as exc:
-            await _broadcast(task_id or "unknown", {"event": "error", "message": str(exc)})
+            log.error(f"[api] Task {task_id} failed: {exc}")
+            await _broadcast(task_id, {"event": "error", "message": str(exc)})
 
     asyncio.create_task(_run_and_broadcast())
-    actual_id = task_id or "pending"
-    return {"task_id": actual_id, "status": "started", "goal": req.goal}
+    return {"task_id": task_id, "status": "started", "goal": req.goal}
 
 
 @app.get("/tasks", summary="List all checkpointed tasks")

@@ -20,7 +20,7 @@ class SubTask(BaseModel):
     # Human-readable description of what should be done
     description: str = Field(
         ...,
-        min_length=5,
+        min_length=1,
         description="Clear description of what this sub-agent must do"
     )
 
@@ -52,10 +52,10 @@ class ExecutionPlan(BaseModel):
     Subtasks are executed in order, with dependency checks respected.
     """
 
-    goal: str = Field(..., min_length=5, description="Original user goal")
+    goal: str = Field(..., min_length=1, description="Original user goal")
     steps: list[SubTask] = Field(
         ...,
-        min_length=1,
+        min_length=0,
         description="Ordered list of subtasks to execute"
     )
     estimated_duration_seconds: Optional[int] = Field(

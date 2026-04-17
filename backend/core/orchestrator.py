@@ -255,6 +255,28 @@ class MasterOrchestrator:
                  f"{[s.agent for s in plan_steps]}")
         return state
 
+    def _parse_plan_from_text(self, text: str, goal: str) -> list[SubTask]:
+        """Fallback: roughly try to map text mentions of agents if tool calls fail."""
+        steps = []
+        text_lower = text.lower()
+        order = 0
+        
+        # Simple heuristic fallback
+        if "research" in text_lower or "search" in text_lower:
+            steps.append(SubTask(agent="research_agent", description=goal[:50], input={"query": goal}, order=order))
+            order += 1
+        if "code" in text_lower or "github" in text_lower:
+            steps.append(SubTask(agent="code_agent", description="Check code", input={"repo": "", "action": "list_issues"}, order=order))
+            order += 1
+        if "knowledge" in text_lower or "notion" in text_lower:
+            steps.append(SubTask(agent="knowledge_agent", description="Read Notion", input={"action": "read"}, order=order))
+            order += 1
+        if "comms" in text_lower or "email" in text_lower or "message" in text_lower:
+            steps.append(SubTask(agent="comms_agent", description="Send comms", input={"action": "read"}, order=order))
+            order += 1
+            
+        return steps
+
     # ── Step 2: Execute plan ──────────────────────────────────────────────────
 
     async def _execute_plan(self, state: AgentState) -> AgentState:

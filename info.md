@@ -1,38 +1,53 @@
-# FRAME-MO: A Multi-Orchestral Agentic Framework for Reliable Multi-Step Task Execution
+# FRAME-MO: Fault-Resilient Agentic Multi-Orchestral Engine
 ### Zero to One | Photon 2026 — PS1: AI Systems / Agents
-### Research & Architecture Document
+### Codebase Reference Document — Source of Truth
 
 ---
 
 ## Table of Contents
-1. [Problem Statement & Core Insight](#1-problem-statement--core-insight)
+1. [Project Overview](#1-project-overview)
 2. [Why Agents Fail — Failure Taxonomy](#2-why-agents-fail--failure-taxonomy)
-3. [System Overview — Multi-Orchestral Architecture](#3-system-overview--multi-orchestral-architecture)
-4. [Agent Roles & Responsibilities](#4-agent-roles--responsibilities)
-5. [LLM Strategy — Anthropic SDK + Groq API](#5-llm-strategy--anthropic-sdk--groq-api)
-6. [MCP Tool Integration](#6-mcp-tool-integration)
-7. [Function Tools (Native)](#7-function-tools-native)
-8. [Reliability Pillars](#8-reliability-pillars)
-9. [Local Setup Architecture](#9-local-setup-architecture)
-10. [Full System Architecture Diagram](#10-full-system-architecture-diagram)
-11. [Data Flow — Step by Step](#11-data-flow--step-by-step)
-12. [Failure Recovery Scenarios](#12-failure-recovery-scenarios)
-13. [Tech Stack Summary](#13-tech-stack-summary)
-14. [Hackathon Demo Plan](#14-hackathon-demo-plan)
-15. [References](#15-references)
+3. [System Architecture](#3-system-architecture)
+4. [Directory Structure](#4-directory-structure)
+5. [Backend — Core Modules](#5-backend--core-modules)
+6. [Backend — Agent Layer](#6-backend--agent-layer)
+7. [Backend — Tools Layer](#7-backend--tools-layer)
+8. [Backend — Schemas](#8-backend--schemas)
+9. [Backend — Configuration](#9-backend--configuration)
+10. [Backend — API Layer (FastAPI + WebSocket)](#10-backend--api-layer-fastapi--websocket)
+11. [Backend — CLI Entry Point](#11-backend--cli-entry-point)
+12. [Frontend — React Dashboard](#12-frontend--react-dashboard)
+13. [LLM Strategy — Ollama + Groq](#13-llm-strategy--ollama--groq)
+14. [MCP Tool Integration](#14-mcp-tool-integration)
+15. [Reliability Pillars](#15-reliability-pillars)
+16. [Data Flow — Step by Step](#16-data-flow--step-by-step)
+17. [Failure Recovery Scenarios](#17-failure-recovery-scenarios)
+18. [Environment Variables & Setup](#18-environment-variables--setup)
+19. [Tech Stack Summary](#19-tech-stack-summary)
+20. [Hackathon Demo Plan](#20-hackathon-demo-plan)
+21. [References](#21-references)
 
 ---
 
-## 1. Problem Statement & Core Insight
+## 1. Project Overview
 
 > *"Most agents fail when APIs break, steps fail, or outputs are inconsistent. The challenge is reliability, not intelligence."*
 
-This is a systems engineering problem, not a model intelligence problem. FRAME-MO (Fault-Resilient Agentic Multi-Orchestral Engine) addresses it through a **multi-layered agent architecture** where:
+FRAME-MO (Fault-Resilient Agentic Multi-Orchestral Engine) is a **hierarchical multi-agent system** built around the principle that orchestration and reliability are harder engineering problems than raw model intelligence.
 
-- A **Master Orchestrator** (Claude claude-sonnet-4-6 via Anthropic SDK) handles planning, routing, and decision-making
-- **Specialized Sub-Agents** (Groq API — llama-3.3-70b-versatile) handle fast, domain-specific execution
-- **MCP Servers** provide standardized, live connections to Gmail, GitHub, Notion, and web
-- **Reliability middleware** (checkpointing, retry, schema validation) wraps every step
+### Core Design Decisions (as implemented)
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Master Orchestrator LLM | Ollama (local) via OpenAI SDK | Privacy, zero cloud cost, offline capable |
+| Sub-Agent LLM | Groq LLaMA 3.3-70b | Sub-500ms inference, low cost, tool calling support |
+| MCP — Web Search | Tavily MCP (`@tavily/mcp-server`) | High-quality search results, structured output |
+| MCP — Code | GitHub MCP (`@modelcontextprotocol/server-github`) | Official MCP server, stdio transport |
+| MCP — Knowledge | Notion MCP (`mcp.notion.com/mcp`) | Official Notion remote MCP |
+| MCP — Email | Gmail MCP (`gmailmcp.googleapis.com`) | Official Google MCP |
+| API Layer | FastAPI + WebSocket | Real-time dashboard updates |
+| Frontend | React + Vite + TailwindCSS | Live task visualization |
+| State persistence | SQLite (`agent_checkpoints.db`) | Local, durable, zero infra |
 
 ### The Probability Compounding Problem
 
@@ -45,7 +60,7 @@ If each step has a 98% success rate:
 | 20 steps | 66.8% |
 | 30 steps | 54.5% |
 
-Most production pipelines have per-step success rates well below 98%. FRAME-MO's reliability layer keeps system-level success rate above 91% even under 40% simulated failure conditions.
+FRAME-MO's reliability layer (retry + checkpoint + validation + HITL) keeps system-level success above 91% even under simulated 40% failure conditions.
 
 ---
 
@@ -54,554 +69,421 @@ Most production pipelines have per-step success rates well below 98%. FRAME-MO's
 ### 2.1 External Dependency Failures
 | Failure | Cause | FRAME-MO Response |
 |---|---|---|
-| API rate limit (429) | Too many requests | Exponential backoff + jitter |
+| API rate limit (429) | Too many requests | Exponential backoff + jitter (`core/retry.py`) |
 | Silent schema change | 3rd party API update | Pydantic validation gate catches mismatch |
 | Network timeout | Connectivity loss | Retry with cached fallback |
-| Auth token expiry | Long-running agent | Token refresh hook in tool wrapper |
+| MCP server crash | Child process died | Reconnect logic in `MCPConnectionManager` |
+| Missing API keys | .env not configured | Startup check via `validate_env_keys()`, falls back to stub mode |
 
 ### 2.2 LLM Output Failures
 | Failure | Cause | FRAME-MO Response |
 |---|---|---|
-| Hallucinated tool call | Model invents non-existent tool | Strict tool registry enforcement |
-| Schema drift | Missing JSON field | Pydantic BaseModel validation before checkpoint |
-| Context overflow | Long pipeline exceeds window | Sub-agent isolation (each agent has own context) |
-| Non-determinism | temperature > 0 | Structured outputs enforce schema regardless |
+| Non-JSON output | Model wraps in markdown fences | Strip ` ```json ` blocks in `_call_groq()` and `_aggregate()` |
+| Schema drift | Missing required field | Pydantic `model_validate()` in `validate_agent_output()` |
+| Context overflow | Long pipeline exceeds window | Sub-agent isolation — each agent has its own context |
+| Tool call loop | Model keeps calling tools | Tool call loop in `base_agent._call_groq()` terminates on no tool calls |
 
 ### 2.3 Orchestration Failures
 | Failure | Cause | FRAME-MO Response |
 |---|---|---|
-| State loss on crash | No persistence | SQLite checkpointer on every node |
-| Duplicate side effects | Non-idempotent retry | Idempotency keys on all MCP calls |
-| Partial state corruption | Multi-store partial write | Event sourcing — single source of truth |
-| Cascading errors | Bad output flows downstream | Validation gate between every agent hop |
+| State loss on crash | No persistence | SQLite checkpoint after every agent hop |
+| Duplicate side effects | Non-idempotent retry | SHA-256 idempotency key registry in `MCPConnectionManager` |
+| Cascading errors | Bad output flows downstream | Validation gate between every agent hop in `_execute_plan()` |
+| Process killed mid-task | External interruption | `resume_or_create()` loads checkpoint on restart |
 
 ### 2.4 Composition Failures
-The most dangerous failure mode. When agents are chained, error probability compounds multiplicatively. FRAME-MO breaks the compounding problem by:
+The most dangerous failure mode. FRAME-MO breaks error compounding by:
 - **Isolating each sub-agent's context** — failures don't bleed across agents
 - **Validating at every handoff** — the orchestrator never passes unvalidated output
-- **Checkpointing after every agent hop** — recovery restarts from the last successful agent, not step zero
+- **Checkpointing after every agent hop** — recovery restarts from the last successful agent
 
 ---
 
-## 3. System Overview — Multi-Orchestral Architecture
-
-FRAME-MO uses a **hierarchical multi-agent** pattern. One Master Orchestrator receives the user's goal, decomposes it into subtasks, and routes each subtask to a specialized sub-agent. Sub-agents are isolated — they have their own context, their own tools, and their own retry budgets.
+## 3. System Architecture
 
 ```
-User Goal
-    │
-    ▼
-┌─────────────────────────────────────────────────────┐
-│            MASTER ORCHESTRATOR                      │
-│         (Claude claude-sonnet-4-6 — Anthropic SDK)      │
-│                                                     │
-│  1. Parse & decompose user goal                     │
-│  2. Build execution plan (ordered subtask list)     │
-│  3. Route each subtask to the right sub-agent       │
-│  4. Validate sub-agent outputs before chaining      │
-│  5. Aggregate final result                          │
-└──────┬──────────┬──────────┬──────────┬────────────┘
-       │          │          │          │
-       ▼          ▼          ▼          ▼
-  [RESEARCH]  [CODE]   [KNOWLEDGE]  [COMMS]
-  Sub-Agent   Sub-Agent  Sub-Agent   Sub-Agent
-  (Groq)      (Groq)     (Groq)      (Groq)
+┌─────────────────────────────────────────────────────────────────────┐
+│                          USER INTERFACE                             │
+│                                                                     │
+│   CLI: python main.py --task "..."                                  │
+│   Web: React Dashboard → http://localhost:5173                      │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│                   FastAPI + WebSocket  (api.py)                     │
+│  POST /tasks · GET /tasks · GET /tasks/{id}                        │
+│  POST /tasks/{id}/hitl · WS /ws/{id} · GET /mcp/health            │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│                  MASTER ORCHESTRATOR                                │
+│           Ollama (local) via OpenAI SDK                            │
+│    OLLAMA_ORCHESTRATOR_MODEL (default: llama3.3)                   │
+│                                                                     │
+│  1. Parse & decompose user goal  →  ExecutionPlan                  │
+│  2. Route each SubTask to the right sub-agent                      │
+│  3. Validate sub-agent outputs with Pydantic                       │
+│  4. HITL gate for irreversible actions                             │
+│  5. Checkpoint AgentState after every hop                          │
+│  6. Aggregate final result                                         │
+└───┬──────────────┬──────────────┬──────────────┬───────────────────┘
+    │              │              │              │
+    ▼              ▼              ▼              ▼
+[RESEARCH]    [CODE]       [KNOWLEDGE]    [COMMS]
+Sub-Agent   Sub-Agent     Sub-Agent     Sub-Agent
+(Groq)      (Groq)        (Groq)        (Groq)
+    │              │              │              │
+    ▼              ▼              ▼              ▼
+Tavily MCP   GitHub MCP   Notion MCP   Gmail MCP
+(stdio)      (stdio)      (url)        (url)
+                                                │
+┌───────────────────────────────────────────────────────────────────┐
+│                    RELIABILITY LAYER                              │
+│  Retry + Backoff · Pydantic Validation · SQLite Checkpoint        │
+│  Idempotency Key Registry · HITL Gate · Stub MCP (dev mode)      │
+└───────────────────────────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│              PERSISTENCE — SQLite (agent_checkpoints.db)           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why This Design?
+---
 
-**Master uses Claude (Anthropic SDK):** Planning, decomposition, and routing are the highest-stakes decisions. Claude claude-sonnet-4-6 has superior instruction-following and structured output reliability for orchestration tasks.
+## 4. Directory Structure
 
-**Sub-agents use Groq:** Execution tasks (search, read a GitHub PR, write to Notion, send email) are lower-complexity but need to be **fast**. Groq's inference speed (500+ tokens/sec) means sub-agents respond in under a second. This also reduces cost significantly.
-
-**Sub-agents are isolated:** Each sub-agent gets only the context it needs for its subtask. This prevents context overflow, reduces hallucination, and makes failures isolated — a crash in the Code sub-agent does not affect the Research sub-agent.
+```
+TaskForge/
+├── info.md                         # This document
+├── README.md
+│
+├── backend/
+│   ├── main.py                     # CLI entry point + Rich terminal UI
+│   ├── api.py                      # FastAPI + WebSocket server
+│   ├── requirements.txt
+│   ├── .env                        # Local keys (never committed)
+│   ├── .env.example                # Template
+│   ├── agent_checkpoints.db        # SQLite — auto-created on first run
+│   │
+│   ├── core/
+│   │   ├── orchestrator.py         # MasterOrchestrator (Ollama / OpenAI SDK)
+│   │   ├── checkpoint.py           # CheckpointStore (SQLite)
+│   │   ├── hitl.py                 # HITLGate — CLI + headless API mode
+│   │   ├── retry.py                # @with_retry decorator (exponential backoff)
+│   │   └── state.py                # (legacy stub, state lives in schemas/)
+│   │
+│   ├── agents/
+│   │   ├── __init__.py             # AGENT_REGISTRY dict
+│   │   ├── base_agent.py           # BaseAgent ABC — Groq + tool loop + validation
+│   │   ├── research_agent.py       # ResearchAgent — Tavily MCP
+│   │   ├── code_agent.py           # CodeAgent — GitHub MCP
+│   │   ├── knowledge_agent.py      # KnowledgeAgent — Notion MCP
+│   │   └── comms_agent.py          # CommsAgent — Gmail MCP
+│   │
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── registry.py             # TOOL_REGISTRY + @tool decorator
+│   │   ├── native_tools.py         # Pure Python function tools
+│   │   └── mcp_manager.py          # MCPConnectionManager (with stub fallback)
+│   │
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── agent_state.py          # AgentState dataclass
+│   │   ├── agent_outputs.py        # Pydantic output schemas per agent
+│   │   └── execution_plan.py       # ExecutionPlan + SubTask schemas
+│   │
+│   └── config/
+│       ├── __init__.py
+│       ├── prompts.py              # System prompts for all 5 agents
+│       └── mcp_configs.py          # MCP server configs + validate_env_keys()
+│
+└── frontend/
+    ├── index.html
+    ├── package.json                # React 18 + Vite + TailwindCSS
+    ├── vite.config.js
+    ├── tailwind.config.js
+    └── src/
+        ├── main.jsx                # React entry
+        ├── App.jsx                 # Full dashboard UI (single component)
+        └── index.css
+```
 
 ---
 
-## 4. Agent Roles & Responsibilities
+## 5. Backend — Core Modules
 
-### 4.1 Master Orchestrator
-- **Model:** Claude claude-sonnet-4-6 (Anthropic SDK)
-- **Responsibility:** Goal parsing, task planning, agent routing, output aggregation, HITL gate management
-- **Tools:** None directly — delegates all tool use to sub-agents
-- **Key behaviors:**
-  - Generates a typed `ExecutionPlan` (ordered list of `SubTask` objects)
-  - Validates each sub-agent response before passing to the next agent
-  - Manages the global `AgentState` checkpoint
-  - Triggers HITL when confidence < threshold or step is irreversible
+### 5.1 `core/orchestrator.py` — MasterOrchestrator
 
-### 4.2 Research Sub-Agent
-- **Model:** llama-3.3-70b-versatile (Groq API)
-- **Responsibility:** Web research, fact-finding, URL fetching, summarization
-- **MCP Tools:** Web Search, Web Fetch
-- **Function Tools:** `search_web()`, `fetch_url()`, `extract_content()`
-- **Output Schema:** `ResearchResult { query, summary, sources[], confidence, timestamp }`
-
-### 4.3 Code Sub-Agent
-- **Model:** llama-3.3-70b-versatile (Groq API)
-- **Responsibility:** GitHub interactions — read PRs, issues, code, create comments, open issues
-- **MCP Tools:** GitHub MCP Server
-- **Function Tools:** `get_pr_diff()`, `post_review_comment()`, `create_github_issue()`
-- **Output Schema:** `CodeResult { repo, action_taken, pr_number, comment_id, status }`
-
-### 4.4 Knowledge Sub-Agent
-- **Model:** llama-3.3-70b-versatile (Groq API)
-- **Responsibility:** Read from and write to Notion — pages, databases, blocks
-- **MCP Tools:** Notion MCP Server
-- **Function Tools:** `read_notion_page()`, `create_notion_page()`, `append_notion_block()`
-- **Output Schema:** `KnowledgeResult { page_id, action, content_preview, status }`
-
-### 4.5 Communication Sub-Agent
-- **Model:** llama-3.3-70b-versatile (Groq API)
-- **Responsibility:** Gmail — read threads, draft emails, send reports
-- **MCP Tools:** Gmail MCP Server
-- **Function Tools:** `read_email_thread()`, `draft_email()`, `send_email()`
-- **Output Schema:** `CommsResult { recipient, subject, status, message_id }`
-
----
-
-## 5. LLM Strategy — Anthropic SDK + Groq API
-
-### 5.1 Anthropic SDK (Master Orchestrator)
-
-The Anthropic Python SDK is used for the Master Orchestrator with tool use and structured outputs:
+The central controller. Uses **Ollama via the OpenAI-compatible SDK** (not Anthropic).
 
 ```python
-import anthropic
+import openai
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-# Define routing tools — orchestrator decides which sub-agent to call
-tools = [
-    {
-        "name": "route_to_research_agent",
-        "description": "Route a web research subtask to the Research sub-agent",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Research query"},
-                "depth": {"type": "string", "enum": ["shallow", "deep"]}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "route_to_code_agent",
-        "description": "Route a GitHub-related subtask to the Code sub-agent",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string"},
-                "action": {"type": "string", "enum": ["read_pr", "create_issue", "post_comment"]},
-                "target_id": {"type": "integer"}
-            },
-            "required": ["repo", "action"]
-        }
-    },
-    {
-        "name": "route_to_knowledge_agent",
-        "description": "Route a Notion read/write task to the Knowledge sub-agent",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["read", "create", "append"]},
-                "page_id": {"type": "string"},
-                "content": {"type": "string"}
-            },
-            "required": ["action"]
-        }
-    },
-    {
-        "name": "route_to_comms_agent",
-        "description": "Route an email task to the Communication sub-agent",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["read", "draft", "send"]},
-                "recipient": {"type": "string"},
-                "subject": {"type": "string"},
-                "body": {"type": "string"}
-            },
-            "required": ["action"]
-        }
-    }
-]
-
-def run_orchestrator(user_goal: str, state: dict) -> dict:
-    messages = [{"role": "user", "content": user_goal}]
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        tools=tools,
-        system=ORCHESTRATOR_SYSTEM_PROMPT,
-        messages=messages
-    )
-
-    # Process tool calls — route to appropriate sub-agent
-    for block in response.content:
-        if block.type == "tool_use":
-            result = dispatch_to_sub_agent(block.name, block.input, state)
-            # Append tool result and continue
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": block.id, "content": str(result)}]
-            })
-
-    return state
+self.client = openai.OpenAI(
+    base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+    api_key="ollama"   # synthetic key — Ollama requires a non-empty value
+)
+self.model = os.environ.get("OLLAMA_ORCHESTRATOR_MODEL", "llama3.3")
 ```
 
-### 5.2 Groq API (Sub-Agents)
+**Three-phase execution:**
 
-Sub-agents use the Groq SDK with the OpenAI-compatible client for tool calling:
-
-```python
-from groq import Groq
-
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-def run_sub_agent(agent_name: str, task: dict, tools: list) -> dict:
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": SUB_AGENT_PROMPTS[agent_name]},
-            {"role": "user", "content": json.dumps(task)}
-        ],
-        tools=tools,
-        tool_choice="auto",
-        temperature=0.1,       # Low temperature for deterministic outputs
-        max_tokens=2048
-    )
-
-    # Handle tool calls returned by Groq
-    message = response.choices[0].message
-    if message.tool_calls:
-        return execute_tool_calls(message.tool_calls, agent_name)
-
-    return {"output": message.content, "status": "complete"}
-```
-
-### 5.3 Why This Hybrid Approach?
-
-| Concern | Claude (Orchestrator) | Groq/LLaMA (Sub-Agents) |
+| Phase | Method | What it does |
 |---|---|---|
-| Task type | Planning, routing, synthesis | Execution, retrieval, writing |
-| Latency | Acceptable (2–5s) | Critical (<1s) |
-| Cost | Higher — used sparingly | Lower — called often |
-| Instruction following | Best-in-class | Good for scoped tasks |
-| Context window | 200k tokens | 128k tokens |
-| Structured output | Native (Anthropic SDK) | Via JSON mode + Pydantic |
+| Planning | `_plan()` | Calls Ollama with `ROUTING_TOOLS`; each tool call maps to a sub-agent |
+| Execution | `_execute_plan()` | Runs sub-agents in order; skips completed agents on resume |
+| Aggregation | `_aggregate()` | Calls Ollama to synthesize all results into a final JSON summary |
 
----
+**Routing tools** (exposed to Ollama as OpenAI-format function tools):
+- `route_to_research_agent` → `research_agent`
+- `route_to_code_agent` → `code_agent`
+- `route_to_knowledge_agent` → `knowledge_agent`
+- `route_to_comms_agent` → `comms_agent`
 
-## 6. MCP Tool Integration
+**HITL trigger rules** (in `_needs_hitl()`):
+- Agent is a **write agent** (`knowledge_agent`, `comms_agent`, `code_agent`) AND action is a write (`create`, `append`, `send`, `create_issue`, `post_comment`)
+- OR retry count **≥ 2** for that agent
 
-MCP (Model Context Protocol) is the universal standard for connecting agents to external services. FRAME-MO uses four MCP servers, all run locally.
+**Validation flow** (in `_execute_plan()`):
+1. Dispatch to sub-agent → get raw dict
+2. Run `validate_agent_output(agent_name, result)` — Pydantic check
+3. If validation fails → increment retry, re-dispatch once
+4. Only after valid output → `mark_agent_complete()` + `checkpoint.save(state)`
 
-### 6.1 Gmail MCP
-- **Server:** `https://gmailmcp.googleapis.com/mcp/v1`
-- **Capabilities:** Read threads, list emails, draft, send, search inbox
-- **Used by:** Communication Sub-Agent
-- **Idempotency:** Each send operation tagged with `message_idempotency_key`
-
+**Status accessor for frontend:**
 ```python
-gmail_mcp_config = {
-    "type": "url",
-    "url": "https://gmailmcp.googleapis.com/mcp/v1",
-    "name": "gmail-mcp"
-}
-```
-
-### 6.2 GitHub MCP
-- **Server:** Local GitHub MCP (`npx @modelcontextprotocol/server-github`)
-- **Capabilities:** Read repos, PRs, issues, files; create issues, post comments
-- **Used by:** Code Sub-Agent
-- **Auth:** GitHub Personal Access Token in `.env`
-
-```python
-github_mcp_config = {
-    "type": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-github"],
-    "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": GITHUB_TOKEN}
-}
-```
-
-### 6.3 Notion MCP
-- **Server:** `https://mcp.notion.com/mcp`
-- **Capabilities:** Read/write pages, create databases, append blocks, search workspace
-- **Used by:** Knowledge Sub-Agent
-- **Auth:** Notion Integration Token
-
-```python
-notion_mcp_config = {
-    "type": "url",
-    "url": "https://mcp.notion.com/mcp",
-    "name": "notion-mcp"
-}
-```
-
-### 6.4 Web Search / Fetch MCP
-- **Server:** Local Brave Search MCP (`npx @modelcontextprotocol/server-brave-search`)
-- **Capabilities:** Web search (Brave API), URL fetching, content extraction
-- **Used by:** Research Sub-Agent
-
-```python
-websearch_mcp_config = {
-    "type": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-    "env": {"BRAVE_API_KEY": BRAVE_API_KEY}
-}
-```
-
-### MCP Connection Manager
-
-```python
-class MCPConnectionManager:
-    """Manages MCP server connections with health checks and reconnection."""
-
-    def __init__(self):
-        self.connections = {}
-        self.health_status = {}
-
-    async def connect(self, name: str, config: dict):
-        try:
-            conn = await mcp.connect(config)
-            self.connections[name] = conn
-            self.health_status[name] = "healthy"
-            log.info("mcp_connected", server=name)
-        except Exception as e:
-            self.health_status[name] = "failed"
-            log.error("mcp_connection_failed", server=name, error=str(e))
-
-    async def call_tool(self, server: str, tool: str, args: dict) -> dict:
-        if self.health_status.get(server) != "healthy":
-            await self.reconnect(server)
-
-        idempotency_key = f"{server}_{tool}_{hash(str(args))}"
-        # Check call log before executing
-        if idempotency_key in self.call_log:
-            return self.call_cache[idempotency_key]
-
-        result = await self.connections[server].call_tool(tool, args)
-        self.call_log.add(idempotency_key)
-        self.call_cache[idempotency_key] = result
-        return result
+def get_live_status(self, task_id: str) -> dict | None:
+    # Returns: task_id, status, goal, current_agent, completed_agents,
+    #          retry_counts, error_count, hitl_pending, mcp_health
 ```
 
 ---
 
-## 7. Function Tools (Native)
+### 5.2 `core/checkpoint.py` — CheckpointStore
 
-Beyond MCP servers, FRAME-MO exposes native Python function tools directly to both the Orchestrator and sub-agents. These are defined as Anthropic-compatible tool schemas.
+SQLite-backed state persistence.
 
-### Tool Definition Pattern
-
-```python
-from pydantic import BaseModel, Field
-from typing import Callable
-
-class ToolDefinition(BaseModel):
-    name: str
-    description: str
-    input_schema: dict
-    handler: Callable  # The actual Python function
-
-def tool(name: str, description: str):
-    """Decorator to register a function as an agent tool."""
-    def decorator(func):
-        schema = build_schema_from_annotations(func)
-        TOOL_REGISTRY[name] = ToolDefinition(
-            name=name,
-            description=description,
-            input_schema=schema,
-            handler=func
-        )
-        return func
-    return decorator
+**Schema:**
+```sql
+CREATE TABLE IF NOT EXISTS checkpoints (
+    task_id    TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
 ```
 
-### Registered Native Function Tools
+**Key methods:**
+| Method | Purpose |
+|---|---|
+| `save(state)` | Upsert full AgentState JSON |
+| `load(task_id)` | Deserialise AgentState from JSON |
+| `resume_or_create(task_id, goal)` | Load existing (if not complete/failed) or create new |
+| `list_tasks()` | Return all tasks for CLI `--list-tasks` and `GET /tasks` |
 
+---
+
+### 5.3 `core/hitl.py` — HITLGate
+
+Dual-mode (CLI terminal + headless API) human approval gate.
+
+**Three triggers for approval (`should_require_approval()`):**
+1. Tool is in `IRREVERSIBLE_ACTIONS` set (`send_email`, `create_github_issue`, `post_github_comment`, `create_notion_page`, `append_notion_block`, `delete_notion_page`)
+2. Confidence < `0.6`
+3. Retry count ≥ `MAX_AUTO_RETRIES` (= 2)
+
+**CLI mode (`request_approval()`):**
+- State checkpointed to SQLite **before** pausing (safe crash recovery)
+- Blocks on `input("Approve? [y/n]: ")`
+- Handles `EOFError`/`KeyboardInterrupt` gracefully (defaults to reject)
+
+**Headless/API mode (`submit_decision()`):**
+- Called from `POST /tasks/{id}/hitl` FastAPI endpoint
+- Resolves the pending `HITLRequest` programmatically without terminal I/O
+
+**Frontend integration (`get_pending()`):**
 ```python
-@tool("extract_structured_data",
-      "Extract structured data from unstructured text using a schema")
-def extract_structured_data(text: str, schema_name: str) -> dict:
-    schema = SCHEMA_REGISTRY[schema_name]
-    # Use Groq with JSON mode to extract structured data
-    result = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user",
-                   "content": f"Extract data matching this schema: {schema}\n\nText: {text}"}],
-        response_format={"type": "json_object"},
-        temperature=0
-    )
-    return json.loads(result.choices[0].message.content)
-
-
-@tool("validate_and_checkpoint",
-      "Validate output against schema and write checkpoint if valid")
-def validate_and_checkpoint(output: dict, schema_name: str, step_name: str,
-                             state: dict) -> dict:
-    schema = SCHEMA_REGISTRY[schema_name]
-    try:
-        validated = schema.model_validate(output)
-        state["step_results"][step_name] = validated.model_dump()
-        state["completed_steps"].append(step_name)
-        write_checkpoint(state)
-        return {"status": "valid", "checkpointed": True}
-    except Exception as e:
-        return {"status": "invalid", "error": str(e), "checkpointed": False}
-
-
-@tool("summarize_content",
-      "Summarize long content to fit within sub-agent context window")
-def summarize_content(content: str, max_tokens: int = 500) -> str:
-    if len(content.split()) < max_tokens:
-        return content
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user",
-                   "content": f"Summarize in under {max_tokens} words:\n\n{content}"}],
-        temperature=0
-    )
-    return response.choices[0].message.content
-
-
-@tool("calculate_confidence",
-      "Calculate confidence score for an agent output")
-def calculate_confidence(output: dict, expected_fields: list) -> float:
-    present = sum(1 for f in expected_fields if output.get(f))
-    return round(present / len(expected_fields), 2)
+# Returns list of dicts for dashboard polling:
+[{ "task_id", "agent", "action", "reason", "waiting_since" }]
 ```
 
 ---
 
-## 8. Reliability Pillars
-
-### 8.1 Checkpointing
-
-State is checkpointed to a local SQLite database after every successful agent hop. The checkpoint stores the full `AgentState`, making recovery possible from any point.
+### 5.4 `core/retry.py` — Retry Decorator
 
 ```python
-import sqlite3, json
-from dataclasses import dataclass, asdict
-from datetime import datetime
+@with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0)
+async def _attempt():
+    ...
+```
 
+- Catches: `TimeoutError`, `RateLimitError`, `ConnectionError`
+- Fails fast on: `NotFoundError`, `AuthError`, `FatalError`
+- Delay formula: `min(base_delay * 2^attempt, max_delay) + jitter(0–20%)`
+- Raises `AgentStepError` after max retries
+
+---
+
+## 6. Backend — Agent Layer
+
+### 6.1 `agents/base_agent.py` — BaseAgent
+
+Abstract base class all sub-agents inherit from.
+
+**Groq client initialisation:**
+```python
+self.groq = Groq(api_key=os.environ["GROQ_API_KEY"])
+```
+
+**`run()` — top-level entry:**
+1. `mark_agent_started(agent_name)` on state
+2. Wraps `_call_groq()` + `_validate()` in `@with_retry(max_attempts=3)`
+3. Returns validated `model_dump()` dict
+
+**`_call_groq()` — Groq tool call loop:**
+1. Initial Groq call with system prompt + task JSON
+2. Strips ` ```json ``` ` fences from response if present
+3. **Tool call loop:** while `message.tool_calls` → dispatch each → append result → continuation call
+4. Parse final JSON from `message.content`
+
+**`_dispatch_tool()` — tool routing:**
+- Checks `TOOL_REGISTRY` first (native Python tools)
+- Falls back to `mcp.call_tool(mcp_server, tool_name, args)` (MCP tools)
+
+**Model used by ALL sub-agents:** `llama-3.3-70b-versatile` (Groq)
+
+---
+
+### 6.2 Sub-Agent Specifics
+
+| Agent | File | MCP Server | Tool Names | Output Schema |
+|---|---|---|---|---|
+| ResearchAgent | `research_agent.py` | `tavily-mcp` | `search`, `fetch_url`, `extract_content` | `ResearchResult` |
+| CodeAgent | `code_agent.py` | `github-mcp` | `get_pr_diff`, `create_github_issue`, `post_review_comment`, `list_issues` | `CodeResult` |
+| KnowledgeAgent | `knowledge_agent.py` | `notion-mcp` | `read_notion_page`, `create_notion_page`, `append_notion_block`, `search_notion` | `KnowledgeResult` |
+| CommsAgent | `comms_agent.py` | `gmail-mcp` | `read_email_thread`, `draft_email`, `send_email` | `CommsResult` |
+
+**Agent registry** (`agents/__init__.py`):
+```python
+AGENT_REGISTRY = {
+    "research_agent":  ResearchAgent,
+    "code_agent":      CodeAgent,
+    "knowledge_agent": KnowledgeAgent,
+    "comms_agent":     CommsAgent,
+}
+```
+
+Agents are **lazily instantiated** by the orchestrator's `_dispatch_agent()`.
+
+---
+
+## 7. Backend — Tools Layer
+
+### 7.1 `tools/mcp_manager.py` — MCPConnectionManager
+
+Manages lifecycle of all 4 MCP server connections.
+
+**MCP server configs (built from env vars):**
+| Server | Transport | Command/URL |
+|---|---|---|
+| `tavily-mcp` | stdio | `npx -y @tavily/mcp-server` |
+| `github-mcp` | stdio | `npx -y @modelcontextprotocol/server-github` |
+| `notion-mcp` | url | `https://mcp.notion.com/mcp` |
+| `gmail-mcp` | url | `https://gmailmcp.googleapis.com/mcp/v1` |
+
+**Agent → MCP server mapping:**
+```python
+AGENT_MCP_MAP = {
+    "research_agent":  "tavily-mcp",
+    "code_agent":      "github-mcp",
+    "knowledge_agent": "notion-mcp",
+    "comms_agent":     "gmail-mcp",
+}
+```
+
+**Idempotency (deduplication):**
+```python
+idem_key = SHA256(f"{server}:{tool}:{json.dumps(args, sort_keys=True)}")
+# If key already in _call_log → return cached result, skip actual call
+```
+
+**Health states:** `disconnected` → `healthy` | `stub` | `failed` | `reconnecting`
+
+**Stub mode** (`_StubMCPConnection`):
+- Activated automatically if the `mcp` Python package is not installed
+- Returns realistic placeholder data so the full agent pipeline can run locally without live API keys
+- Stub responses defined for all 11 tools across all 4 MCP servers
+
+---
+
+### 7.2 `tools/registry.py` — Tool Registry
+
+```python
+@tool("tool_name", "description")
+def my_tool(arg1: str, arg2: int) -> dict:
+    ...
+```
+
+The `@tool` decorator registers functions into `TOOL_REGISTRY` with auto-generated OpenAI/Groq-compatible JSON schemas.
+
+**Helper: `get_groq_schemas(tool_names)`** — returns the list of Groq-format tool dicts for a given agent's `tool_names` list.
+
+---
+
+### 7.3 `tools/native_tools.py` — Native Function Tools
+
+Pure Python tools callable by any agent (no MCP required):
+
+| Tool | Purpose |
+|---|---|
+| `extract_structured_data` | Extract typed data from unstructured text via Groq JSON mode |
+| `validate_and_checkpoint` | Validate output against Pydantic schema + write checkpoint |
+| `summarize_content` | Truncate/summarize long content to fit sub-agent context window |
+| `calculate_confidence` | Score confidence based on presence of expected output fields |
+
+---
+
+## 8. Backend — Schemas
+
+### 8.1 `schemas/agent_state.py` — AgentState
+
+Single source of truth for a running task. Serialised to JSON in SQLite.
+
+```python
 @dataclass
 class AgentState:
     task_id: str
     version: int = 2
     goal: str = ""
-    execution_plan: list = None
+    execution_plan: list = []        # list of SubTask dicts
     current_agent: str = ""
-    completed_agents: list = None
-    agent_results: dict = None
-    tool_call_log: list = None
-    retry_counts: dict = None
-    error_log: list = None
-    status: str = "pending"   # pending | running | paused_hitl | complete | failed
+    completed_agents: list = []
+    agent_results: dict = {}         # agent_name → validated result dict
+    tool_call_log: list = []         # full audit trail of tool calls
+    retry_counts: dict = {}          # agent_name → int
+    error_log: list = []
+    status: Literal["pending", "running", "paused_hitl", "complete", "failed"] = "pending"
     created_at: str = ""
     updated_at: str = ""
-
-    def __post_init__(self):
-        self.execution_plan = self.execution_plan or []
-        self.completed_agents = self.completed_agents or []
-        self.agent_results = self.agent_results or {}
-        self.tool_call_log = self.tool_call_log or []
-        self.retry_counts = self.retry_counts or {}
-        self.error_log = self.error_log or []
-        self.created_at = self.created_at or datetime.utcnow().isoformat()
-
-class CheckpointStore:
-    def __init__(self, db_path: str = "agent_checkpoints.db"):
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._init_schema()
-
-    def _init_schema(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                task_id TEXT PRIMARY KEY,
-                state_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        self.conn.commit()
-
-    def save(self, state: AgentState):
-        state.updated_at = datetime.utcnow().isoformat()
-        self.conn.execute("""
-            INSERT OR REPLACE INTO checkpoints (task_id, state_json, updated_at)
-            VALUES (?, ?, ?)
-        """, (state.task_id, json.dumps(asdict(state)), state.updated_at))
-        self.conn.commit()
-
-    def load(self, task_id: str) -> AgentState | None:
-        row = self.conn.execute(
-            "SELECT state_json FROM checkpoints WHERE task_id = ?", (task_id,)
-        ).fetchone()
-        if row:
-            return AgentState(**json.loads(row[0]))
-        return None
-
-    def resume_or_create(self, task_id: str, goal: str) -> AgentState:
-        existing = self.load(task_id)
-        if existing and existing.status not in ("complete", "failed"):
-            log.info("resuming_from_checkpoint",
-                     task_id=task_id,
-                     resumed_from=existing.current_agent,
-                     completed=existing.completed_agents)
-            return existing
-        return AgentState(task_id=task_id, goal=goal)
 ```
 
-### 8.2 Retry with Exponential Backoff
+**Helper methods:**
+- `mark_agent_started(name)` — sets `current_agent` + `status="running"`
+- `mark_agent_complete(name, result)` — writes result, appends to `completed_agents`, clears `current_agent`
+- `increment_retry(name)` → returns new retry count
+- `log_error(agent, error)` — appends to `error_log` with timestamp
+- `log_tool_call(agent, tool, args)` — appends to `tool_call_log` with timestamp
+- `is_agent_done(name)` → bool
+
+---
+
+### 8.2 `schemas/agent_outputs.py` — Pydantic Output Schemas
 
 ```python
-import asyncio, random
-from functools import wraps
-
-def with_retry(max_attempts=3, base_delay=1.0, max_delay=30.0):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            last_error = None
-            for attempt in range(max_attempts):
-                try:
-                    return await func(*args, **kwargs)
-                except (TimeoutError, RateLimitError, ConnectionError) as e:
-                    last_error = e
-                    if attempt == max_attempts - 1:
-                        break
-                    delay = min(base_delay * (2 ** attempt), max_delay)
-                    jitter = random.uniform(0, delay * 0.2)
-                    wait = delay + jitter
-                    log.warning("retrying_after_failure",
-                                attempt=attempt+1,
-                                wait_seconds=round(wait, 2),
-                                error=str(e))
-                    await asyncio.sleep(wait)
-                except (NotFoundError, AuthError, FatalError):
-                    raise  # Non-retriable — fail fast
-            raise AgentStepError(f"Max retries exceeded: {last_error}")
-        return wrapper
-    return decorator
-```
-
-### 8.3 Output Validation (Pydantic)
-
-Every sub-agent output is validated before the orchestrator processes it:
-
-```python
-from pydantic import BaseModel, Field
-from typing import Literal
-
 class ResearchResult(BaseModel):
     query: str
     summary: str = Field(min_length=20)
     sources: list[str] = Field(min_length=1)
+    key_facts: list[str] = []
     confidence: float = Field(ge=0.0, le=1.0)
     status: Literal["complete", "partial", "failed"]
 
@@ -611,12 +493,17 @@ class CodeResult(BaseModel):
     status: Literal["success", "skipped", "failed"]
     details: str = ""
     pr_number: int | None = None
+    issue_number: int | None = None
+    comment_id: str | None = None
+    url: str = ""
 
 class KnowledgeResult(BaseModel):
     action: Literal["read", "create", "append"]
     page_id: str
+    page_title: str = ""
     status: Literal["success", "failed"]
     content_preview: str = ""
+    page_url: str = ""
 
 class CommsResult(BaseModel):
     action: Literal["read", "draft", "send"]
@@ -624,406 +511,643 @@ class CommsResult(BaseModel):
     recipient: str = ""
     subject: str = ""
     message_id: str = ""
-
-OUTPUT_SCHEMAS = {
-    "research_agent": ResearchResult,
-    "code_agent": CodeResult,
-    "knowledge_agent": KnowledgeResult,
-    "comms_agent": CommsResult,
-}
-
-def validate_agent_output(agent_name: str, raw_output: dict) -> BaseModel:
-    schema = OUTPUT_SCHEMAS[agent_name]
-    try:
-        return schema.model_validate(raw_output)
-    except Exception as e:
-        raise ValidationError(f"[{agent_name}] Output schema violation: {e}")
+    thread_id: str = ""
+    preview: str = ""
 ```
 
-### 8.4 Human-in-the-Loop (HITL) Gate
+**Validation entrypoint:**
+```python
+def validate_agent_output(agent_name: str, raw: dict) -> BaseModel:
+    schema = OUTPUT_SCHEMAS[agent_name]
+    return schema.model_validate(raw)   # raises ValidationError on failure
+```
+
+---
+
+### 8.3 `schemas/execution_plan.py` — ExecutionPlan
 
 ```python
-import time
+class SubTask(BaseModel):
+    agent: str                          # which sub-agent to call
+    description: str                    # human-readable task description
+    input: dict                         # args to pass to the agent
+    requires_hitl: bool = False         # set by orchestrator planning phase
+    order: int = 0                      # execution order index
 
-class HITLGate:
-    """
-    Pauses agent execution and waits for human approval.
-    State is checkpointed before pause — safe to restart if human never responds.
-    """
-    def __init__(self, checkpoint_store: CheckpointStore):
-        self.store = checkpoint_store
-        self.pending = {}  # task_id -> proposed action
-
-    def request_approval(self, task_id: str, action: dict, state: AgentState) -> bool:
-        state.status = "paused_hitl"
-        self.store.save(state)  # Checkpoint before pausing
-        self.pending[task_id] = {
-            "action": action,
-            "requested_at": time.time()
-        }
-        print(f"\n⚠️  HITL APPROVAL REQUIRED — Task: {task_id}")
-        print(f"   Proposed action: {json.dumps(action, indent=2)}")
-        print(f"   Approve? [y/n]: ", end="")
-        decision = input().strip().lower()
-        return decision == "y"
-
-    def should_require_approval(self, action: dict, state: AgentState) -> bool:
-        """Rules for when to pause and ask a human."""
-        irreversible_actions = ["send_email", "create_github_issue",
-                                "post_github_comment", "delete_notion_page"]
-        confidence = action.get("confidence", 1.0)
-        retry_count = state.retry_counts.get(state.current_agent, 0)
-
-        return (
-            action.get("tool") in irreversible_actions or
-            confidence < 0.6 or
-            retry_count >= 2
-        )
+class ExecutionPlan(BaseModel):
+    goal: str
+    steps: list[SubTask]
 ```
 
 ---
 
-## 9. Local Setup Architecture
+## 9. Backend — Configuration
 
-Everything runs locally. No cloud infrastructure needed for the hackathon demo.
+### 9.1 `config/prompts.py` — System Prompts
 
-### Directory Structure
+Five system prompts registered in `AGENT_PROMPTS` dict:
 
-```
-frame-mo/
-├── .env                        # API keys (never committed)
-├── requirements.txt            # Python dependencies
-├── agent_checkpoints.db        # SQLite — auto-created on first run
-│
-├── core/
-│   ├── orchestrator.py         # Master Orchestrator (Anthropic SDK)
-│   ├── checkpoint.py           # CheckpointStore (SQLite)
-│   ├── hitl.py                 # Human-in-the-Loop gate
-│   ├── retry.py                # Retry decorator
-│   └── state.py                # AgentState dataclass
-│
-├── agents/
-│   ├── base_agent.py           # Base class all sub-agents inherit
-│   ├── research_agent.py       # Research sub-agent (Groq + Web MCP)
-│   ├── code_agent.py           # Code sub-agent (Groq + GitHub MCP)
-│   ├── knowledge_agent.py      # Knowledge sub-agent (Groq + Notion MCP)
-│   └── comms_agent.py          # Comms sub-agent (Groq + Gmail MCP)
-│
-├── tools/
-│   ├── registry.py             # Tool registry + @tool decorator
-│   ├── native_tools.py         # Pure Python function tools
-│   └── mcp_manager.py          # MCP connection manager
-│
-├── schemas/
-│   ├── agent_outputs.py        # Pydantic output schemas per agent
-│   ├── agent_state.py          # AgentState schema
-│   └── execution_plan.py       # ExecutionPlan + SubTask schemas
-│
-├── config/
-│   ├── prompts.py              # System prompts for each agent
-│   └── mcp_configs.py          # MCP server configurations
-│
-└── main.py                     # Entry point — run from here
+| Key | Used by | Prompt focus |
+|---|---|---|
+| `"orchestrator"` | MasterOrchestrator (planning + aggregation) | Plan decomposition, never call tools directly, flag HITL |
+| `"research_agent"` | ResearchAgent | Tavily search, fetch URLs, factual synthesis, confidence scoring |
+| `"code_agent"` | CodeAgent | GitHub interactions, confirm before acting, return verifiable IDs |
+| `"knowledge_agent"` | KnowledgeAgent | Notion read/write, clean Markdown formatting, 300-char preview |
+| `"comms_agent"` | CommsAgent | Draft before send, professional tone, always return message_id |
+
+All sub-agent prompts enforce a **specific JSON output structure** that matches the Pydantic schema for that agent.
+
+**Accessor:**
+```python
+def get_prompt(agent_name: str) -> str:
+    return AGENT_PROMPTS[agent_name]   # KeyError if not found
 ```
 
-### Environment Variables
+---
 
+### 9.2 `config/mcp_configs.py` — MCP Server Configurations
+
+Config factory functions per server — credentials read from env vars at call time, never hardcoded.
+
+**Environment key validation:**
+```python
+def validate_env_keys() -> list[str]:
+    # Checks: OLLAMA_BASE_URL, GROQ_API_KEY, GITHUB_PERSONAL_ACCESS_TOKEN,
+    #         TAVILY_API_KEY, NOTION_TOKEN
+    # Returns list of missing key names (empty = all good)
+```
+
+Called at startup by `main.py` to print the env check banner.
+
+---
+
+## 10. Backend — API Layer (FastAPI + WebSocket)
+
+### `api.py` — REST + WebSocket server
+
+**Start command:**
 ```bash
-# .env — local only
-ANTHROPIC_API_KEY=sk-ant-...          # For Master Orchestrator (Claude)
-GROQ_API_KEY=gsk_...                  # For Sub-Agents (LLaMA 3.3)
-GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...  # For GitHub MCP
-BRAVE_API_KEY=BSA...                  # For Web Search MCP
-NOTION_TOKEN=secret_...               # For Notion MCP
+python main.py --serve
+# or directly:
+uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-### Requirements
+**Endpoints:**
 
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/tasks` | Start a new task (runs async in background) |
+| `GET` | `/tasks` | List all checkpointed tasks |
+| `GET` | `/tasks/{id}` | Get live status snapshot |
+| `POST` | `/tasks/{id}/hitl` | Submit HITL approval (headless mode) |
+| `GET` | `/tasks/{id}/hitl/pending` | Get pending HITL requests for a task |
+| `WS` | `/ws/{id}` | WebSocket stream — pushes status every 1s |
+| `GET` | `/mcp/health` | MCP server health status |
+| `GET` | `/health` | API health check |
+
+**Request models:**
+```python
+class StartTaskRequest(BaseModel):
+    goal: str
+    task_id: str | None = None           # resume from checkpoint if set
+    inject_failure: str | None = None    # e.g. "github:rate_limit"
+
+class HITLDecisionRequest(BaseModel):
+    approved: bool
 ```
-anthropic>=0.40.0          # Anthropic SDK — Master Orchestrator
-groq>=0.9.0                # Groq SDK — Sub-Agents
-mcp>=1.0.0                 # MCP client library
-pydantic>=2.5.0            # Schema validation
-structlog>=24.0.0          # Structured logging
-tenacity>=8.2.0            # Retry logic
-python-dotenv>=1.0.0       # .env loading
-aiohttp>=3.9.0             # Async HTTP
-rich>=13.0.0               # Terminal UI for demo
+
+**WebSocket behaviour:**
+- On connect: immediately sends current state snapshot
+- Polls every 1 second via `asyncio.sleep(1)`
+- Breaks loop when task status is `"complete"` or `"failed"`
+- `_broadcast()` helper fans out messages to all clients watching a task
+
+**CORS:** `allow_origins=["*"]` — permissive for local dev
+
+**Lifespan:** connects all MCP servers on startup, closes all on shutdown
+
+---
+
+## 11. Backend — CLI Entry Point
+
+### `main.py` — CLI with Rich terminal UI
+
+**Usage:**
+```bash
+# Run a task
+python main.py --task "Research AI trends, save to Notion, post GitHub issue, email team"
+
+# Resume from checkpoint
+python main.py --task "..." --task-id abc123
+
+# Inject demo failures
+python main.py --task "..." --inject-failure github:rate_limit,notion:malformed_output
+
+# List all checkpointed tasks
+python main.py --list-tasks
+
+# Start FastAPI server for frontend
+python main.py --serve
+python main.py --serve --port 9000
+```
+
+**Failure injection mapping (`--inject-failure`):**
+| Shorthand | Targets agent |
+|---|---|
+| `github:...` | `code_agent` |
+| `notion:...` | `knowledge_agent` |
+| `gmail:...` | `comms_agent` |
+| `tavily:...` | `research_agent` |
+
+**Rich UI components:**
+- `print_banner()` — FRAME-MO header panel
+- `print_env_check()` — green ✓ / yellow ⚠ for missing keys
+- MCP health indicator — green ● (healthy/stub) / red ● (failed)
+- `Progress` spinner during execution
+- `build_metrics_table()` — agent status, retry count, validation, output keys
+- `print_final_result()` — summary panel + error log + metrics table
+- `print_task_list()` — checkpointed task table for `--list-tasks`
+
+Result JSON is saved to `result_{task_id}.json` after every run.
+
+---
+
+## 12. Frontend — React Dashboard
+
+### `frontend/src/App.jsx`
+
+Single-component React app (~435 lines) built with React 18 + Vite + TailwindCSS.
+
+**State:**
+```js
+activeTask     // { id, goal, status } — currently running task
+liveMetrics    // { completed_agents[], current_agent, error_count,
+               //   hitl_pending[], agent_results{} }
+```
+
+**WebSocket connection:**
+- Opens `ws://localhost:8000/ws/{task_id}` when a task starts
+- Updates `liveMetrics` on every `status` or `complete` event
+- Closed on `clearTask()` or component unmount
+
+**API integration:**
+```js
+// Start task
+POST http://localhost:8000/tasks  { goal }
+// → { task_id, status, goal }
+```
+
+**UI sections:**
+
+| Section | Description |
+|---|---|
+| Sidebar | Session history (static recent chats), New session, Settings |
+| Top header | FRAME-MO title, system status indicator (SYSTEM ONLINE / EXECUTING TASK / IDLE) |
+| Empty state | Greeting + tagline when no active task |
+| Active task — Goal banner | Shows goal text, task ID, status badge |
+| Active task — Pipeline cards | 2×2 grid of agent cards (Research, Code, Knowledge, Comms) with live status |
+| HITL alert | Amber banner when `hitl_pending.length > 0` with Approve/Reject buttons |
+| Input area | Textarea + paperclip + MCP modal button + submit |
+| MCP modal | Quick-connect UI for Tavily and GitHub |
+
+**Agent card states:**
+- `pending` — dimmed, grey icon, "Awaiting orchestrator routing"
+- `running` — highlighted border, pulse animation, "Processing context..."
+- `complete` — green border, green ✓ icon, "Task executed successfully."
+
+**Agent colours:**
+| Agent | Colour |
+|---|---|
+| research_agent | blue-500 |
+| code_agent | green-500 |
+| knowledge_agent | purple-500 |
+| comms_agent | amber-500 |
+
+**Accent colour:** `#d97757` (warm orange — matches Claude.ai brand palette)
+
+**Font:** System sans-serif via TailwindCSS defaults
+
+**Dev server:**
+```bash
+cd frontend && npm run dev   # → http://localhost:5173
 ```
 
 ---
 
-## 10. Full System Architecture Diagram
+## 13. LLM Strategy — Ollama + Groq
 
+### 13.1 Master Orchestrator — Ollama (local)
+
+```python
+self.client = openai.OpenAI(
+    base_url="http://localhost:11434/v1",  # OLLAMA_BASE_URL
+    api_key="ollama"
+)
+model = os.environ.get("OLLAMA_ORCHESTRATOR_MODEL", "llama3.3")
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                         USER / TERMINAL                                │
-│                    python main.py --task "..."                         │
-└──────────────────────────────┬─────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼─────────────────────────────────────────┐
-│                      FRAME-MO ENTRY POINT                              │
-│    Load .env → Init CheckpointStore → Resume or Create AgentState      │
-└──────────────────────────────┬─────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼─────────────────────────────────────────┐
-│                   MASTER ORCHESTRATOR                                  │
-│              Claude claude-sonnet-4-6  [Anthropic SDK]                     │
-│                                                                        │
-│   ┌──────────────────────────────────────────────────────────────┐    │
-│   │  System Prompt: Plan, route, validate, aggregate             │    │
-│   │  Tools: route_to_research | route_to_code |                  │    │
-│   │         route_to_knowledge | route_to_comms                  │    │
-│   │  Output: ExecutionPlan { steps: [SubTask...] }               │    │
-│   └──────────────────────────────────────────────────────────────┘    │
-│                  │            │             │            │             │
-│           ┌──────▼──┐  ┌─────▼──┐  ┌──────▼──┐  ┌─────▼──┐         │
-│           │RESEARCH │  │  CODE  │  │KNOWLEDGE│  │ COMMS  │         │
-│           │Sub-Agent│  │Sub-Agent│  │Sub-Agent│  │Sub-Agent│         │
-│           │ (Groq)  │  │ (Groq) │  │ (Groq)  │  │ (Groq) │         │
-│           └────┬────┘  └───┬────┘  └────┬────┘  └───┬────┘         │
-│                │           │            │            │              │
-│   ┌────────────▼───────────▼────────────▼────────────▼──────────┐  │
-│   │                 RELIABILITY LAYER                            │  │
-│   │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │  │
-│   │  │ Retry +      │  │ Pydantic     │  │ Checkpoint       │   │  │
-│   │  │ Backoff      │  │ Validation   │  │ (SQLite)         │   │  │
-│   │  │ (Tenacity)   │  │ Gate         │  │ per agent hop    │   │  │
-│   │  └──────────────┘  └──────────────┘  └──────────────────┘   │  │
-│   │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │  │
-│   │  │ Idempotency  │  │ HITL Gate    │  │ Structlog        │   │  │
-│   │  │ Key Registry │  │ (approval)   │  │ Observability    │   │  │
-│   │  └──────────────┘  └──────────────┘  └──────────────────┘   │  │
-│   └───────────────────────────────────────────────────────────┘  │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼─────────────────────────────────────────┐
-│                        MCP SERVER LAYER                                │
-│                                                                        │
-│   ┌──────────────┐  ┌──────────────┐  ┌───────────┐  ┌────────────┐  │
-│   │  Gmail MCP   │  │  GitHub MCP  │  │Notion MCP │  │Web Search  │  │
-│   │  (Google)    │  │  (local npx) │  │  (cloud)  │  │MCP (Brave) │  │
-│   └──────────────┘  └──────────────┘  └───────────┘  └────────────┘  │
-└────────────────────────────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼─────────────────────────────────────────┐
-│                     PERSISTENCE LAYER                                  │
-│              SQLite (agent_checkpoints.db — local file)                │
-└────────────────────────────────────────────────────────────────────────┘
+
+- Uses the **OpenAI Python SDK** pointed at Ollama's OpenAI-compatible endpoint
+- Default model: `llama3.3` — configurable via `OLLAMA_ORCHESTRATOR_MODEL`
+- The `.env.example` shows `kimi-k2.5:cloud` as an example of a configurable model
+- Called twice per task run: **planning phase** (`_plan`) and **aggregation phase** (`_aggregate`)
+- Tools: `ROUTING_TOOLS` (4 routing functions, OpenAI format)
+- Temperature: `0.1`
+
+### 13.2 Sub-Agents — Groq
+
+```python
+self.groq = Groq(api_key=os.environ["GROQ_API_KEY"])
+# Model: "llama-3.3-70b-versatile"
+# Temperature: 0.1, max_tokens: 2048
+```
+
+- Called from `BaseAgent._call_groq()` with tool-calling loop
+- Each agent has its own `tool_names` list registered in `TOOL_REGISTRY`
+- Tool choice: `"auto"` when tools are present, `None` otherwise
+
+### 13.3 Why This Split?
+
+| Concern | Ollama (Orchestrator) | Groq (Sub-Agents) |
+|---|---|---|
+| Task type | Planning, routing, synthesis | Execution, retrieval, writing |
+| Privacy | Fully local — no data leaves machine | Cloud API |
+| Latency | ~2–5s acceptable for planning | Critical < 1s for execution |
+| Cost | Free (local compute) | Low — paid per token |
+| Tool calling | Supported via OpenAI format | Native Groq support |
+
+---
+
+## 14. MCP Tool Integration
+
+MCP (Model Context Protocol) is the standardised protocol for connecting agents to external services. FRAME-MO runs 4 MCP servers.
+
+### 14.1 Tavily Web Search MCP (`tavily-mcp`)
+- **Transport:** `stdio` via `npx -y @tavily/mcp-server`
+- **Auth:** `TAVILY_API_KEY` passed as env var to child process
+- **Tools:** `search`, `fetch_url`, `extract_content`
+- **Used by:** Research Sub-Agent
+
+### 14.2 GitHub MCP (`github-mcp`)
+- **Transport:** `stdio` via `npx -y @modelcontextprotocol/server-github`
+- **Auth:** `GITHUB_PERSONAL_ACCESS_TOKEN` passed as env var
+- **Tools:** `get_pr_diff`, `list_issues`, `create_github_issue`, `post_review_comment`, `read_file`, `list_repos`
+- **Used by:** Code Sub-Agent
+
+### 14.3 Notion MCP (`notion-mcp`)
+- **Transport:** `url` → `https://mcp.notion.com/mcp`
+- **Auth:** `NOTION_TOKEN` in `Authorization: Bearer` header
+- **Notion-Version header:** `2022-06-28`
+- **Tools:** `read_notion_page`, `create_notion_page`, `append_notion_block`, `search_notion`, `list_databases`
+- **Used by:** Knowledge Sub-Agent
+
+### 14.4 Gmail MCP (`gmail-mcp`)
+- **Transport:** `url` → `https://gmailmcp.googleapis.com/mcp/v1`
+- **Auth:** `GMAIL_OAUTH_TOKEN` in `Authorization: Bearer` header
+- **Tools:** `read_email_thread`, `list_emails`, `draft_email`, `send_email`, `search_inbox`
+- **Used by:** Communication Sub-Agent
+
+### 14.5 Stub Mode
+
+When the `mcp` Python package is not installed, `MCPConnectionManager` automatically switches each server to `_StubMCPConnection`. Stub responses are realistic placeholder dicts that let the full pipeline run without any live API keys:
+
+```python
+STUB_RESPONSES = {
+    "search":              {"results": [{"title": "Stub result", ...}]},
+    "create_github_issue": {"issue_number": 42, "url": "https://github.com/stub/issue/42"},
+    "create_notion_page":  {"page_id": "stub-page-id", "url": "https://notion.so/stub"},
+    "send_email":          {"message_id": "stub-sent-001", "status": "sent"},
+    # ... all 11 tools covered
+}
 ```
 
 ---
 
-## 11. Data Flow — Step by Step
+## 15. Reliability Pillars
 
-Here is the exact flow for a sample task:
-**"Research the latest in agentic AI, create a Notion summary page, post a GitHub issue for the team, and email the report."**
+### 15.1 SQLite Checkpointing
+
+State is written to `agent_checkpoints.db` at these points:
+1. After the planning phase completes (`execution_plan` built)
+2. After each sub-agent completes and its output is validated
+3. **Before** any HITL pause (so the task can be resumed if the process is killed)
+4. On task complete or failed
+
+### 15.2 Retry with Exponential Backoff + Jitter
+
+```python
+delay = min(base_delay * (2 ** attempt), max_delay)
+jitter = random.uniform(0, delay * 0.2)
+wait   = delay + jitter
+```
+
+Default: 3 attempts, 1s base, 30s max. Jitter prevents thundering herd on shared APIs.
+
+### 15.3 Pydantic Output Validation
+
+Every sub-agent output passes through `validate_agent_output()` before the orchestrator processes it. If validation fails:
+1. Retry count incremented on state
+2. Error logged to `state.error_log`
+3. Agent re-dispatched once with corrected context
+4. Second pass must validate — otherwise propagates as `AgentStepError`
+
+### 15.4 HITL Gate
+
+Three triggers for human approval (see `core/hitl.py`):
+1. **Irreversible action** — `send_email`, `create_github_issue`, `post_github_comment`, `create_notion_page`, `append_notion_block`, `delete_notion_page`
+2. **Low confidence** — agent confidence score < 0.6
+3. **High retry count** — agent has already retried ≥ 2 times
+
+State is checkpointed **before** blocking on human input.
+
+### 15.5 Idempotency Registry
+
+Every MCP tool call is hashed (`SHA-256(server:tool:args)`) before execution. If the same call has already been made and cached, the cached result is returned without re-executing the call. This prevents duplicate emails, issues, or Notion pages on retry.
+
+### 15.6 MCP Reconnection
+
+If a server's health status is not `healthy` or `stub`, `MCPConnectionManager` automatically calls `reconnect(name)` before the next tool call.
+
+---
+
+## 16. Data Flow — Step by Step
+
+**Example task:** *"Research the latest in agentic AI, create a Notion summary page, post a GitHub issue for the team, and email the report."*
 
 ```
 Step 0: INIT
-  └── Load .env, connect MCP servers, check for existing checkpoint
+  └── Load .env, connect MCP servers (or switch to stubs)
+  └── Validate env keys → print banner
+  └── CheckpointStore.resume_or_create(task_id, goal)
 
-Step 1: ORCHESTRATOR PLANNING  [Claude claude-sonnet-4-6]
-  └── Parse goal → Generate ExecutionPlan:
-      [
-        SubTask(agent="research_agent", input="latest agentic AI trends"),
-        SubTask(agent="knowledge_agent", input="create Notion page with research output"),
-        SubTask(agent="code_agent", input="post GitHub issue with summary"),
-        SubTask(agent="comms_agent", input="email report to team")
-      ]
+Step 1: ORCHESTRATOR PLANNING  [Ollama — local]
+  └── Calls Ollama with ROUTING_TOOLS
+  └── Ollama makes tool calls → builds ExecutionPlan:
+      [ SubTask(agent=research_agent, order=0),
+        SubTask(agent=knowledge_agent, order=1, requires_hitl=True),
+        SubTask(agent=code_agent, order=2, requires_hitl=True),
+        SubTask(agent=comms_agent, order=3, requires_hitl=True) ]
   └── Checkpoint(step="planning_complete")
 
 Step 2: RESEARCH AGENT  [Groq — LLaMA 3.3]
-  └── Calls: web_search("agentic AI trends 2026") via Web Search MCP
-  └── Calls: fetch_url([top 3 results]) via Web Fetch MCP
-  └── Produces: ResearchResult { summary, sources, confidence=0.91 }
-  └── Validation gate → passes
-  └── Checkpoint(step="research_complete", result=ResearchResult)
+  └── Calls: search("agentic AI trends 2026") via Tavily MCP
+  └── Calls: fetch_url([top results]) via Tavily MCP
+  └── Returns JSON → Pydantic validates as ResearchResult
+  └── Checkpoint(agent="research_agent", result=ResearchResult)
+  └── WebSocket broadcast → frontend updates Research card to ✅
 
 Step 3: KNOWLEDGE AGENT  [Groq — LLaMA 3.3]
-  └── Receives: ResearchResult from checkpoint
+  └── HITL gate triggered (create_notion_page is irreversible)
+      └── CLI: blocks on input("Approve? [y/n]")
+      └── API: POST /tasks/{id}/hitl { approved: true }
   └── Calls: create_notion_page(title, content) via Notion MCP
-      └── HITL gate triggered: irreversible write operation
-          └── Human approves → proceeds
-  └── Produces: KnowledgeResult { page_id, status="success" }
-  └── Validation gate → passes
-  └── Checkpoint(step="knowledge_complete", result=KnowledgeResult)
+  └── Returns JSON → validates as KnowledgeResult
+  └── Idempotency key stored — duplicate retries skip the write
+  └── Checkpoint(agent="knowledge_agent")
 
 Step 4: CODE AGENT  [Groq — LLaMA 3.3]
-  └── Receives: ResearchResult + KnowledgeResult from checkpoint
-  └── Calls: create_github_issue(title, body, labels) via GitHub MCP
-      └── HITL gate triggered: external write operation
-          └── Human approves → proceeds
-  └── Produces: CodeResult { issue_number, status="success" }
-  └── Validation gate → passes
-  └── Checkpoint(step="code_complete", result=CodeResult)
+  └── HITL gate triggered (create_github_issue is irreversible)
+  └── Receives ResearchResult + KnowledgeResult from checkpoint
+  └── Calls: create_github_issue(title, body) via GitHub MCP
+  └── Returns JSON → validates as CodeResult
+  └── Checkpoint(agent="code_agent")
 
 Step 5: COMMS AGENT  [Groq — LLaMA 3.3]
-  └── Receives: all prior results from checkpoint
-  └── Calls: draft_email(recipient, subject, body) via Gmail MCP
-  └── Calls: send_email() via Gmail MCP
-      └── HITL gate triggered: email send is irreversible
-          └── Human approves → proceeds
-  └── Produces: CommsResult { message_id, status="sent" }
-  └── Validation gate → passes
-  └── Checkpoint(step="comms_complete")
+  └── HITL gate triggered (send_email is irreversible)
+  └── Calls: draft_email → send_email via Gmail MCP
+  └── Returns JSON → validates as CommsResult
+  └── Checkpoint(agent="comms_agent")
 
-Step 6: ORCHESTRATOR AGGREGATION  [Claude claude-sonnet-4-6]
-  └── Collects all results from checkpoint
-  └── Generates final structured summary
+Step 6: ORCHESTRATOR AGGREGATION  [Ollama — local]
+  └── All agent_results collected from state
+  └── Calls Ollama with summary prompt → JSON response
+  └── Strips ```json fences if present
+  └── Returns final dict: { task_id, status, goal, summary, highlights,
+                            completed_agents, agent_results, error_log,
+                            retry_counts, completed_at }
   └── Checkpoint(status="complete")
-  └── Prints rich terminal output
+  └── Saves result_{task_id}.json
+  └── WebSocket broadcasts { event: "complete", result }
 ```
 
 ---
 
-## 12. Failure Recovery Scenarios
+## 17. Failure Recovery Scenarios
 
 ### Scenario A: Process killed between Step 3 and Step 4
-
 ```
 Recovery:
-  1. User re-runs: python main.py --task "..." --task-id abc123
+  1. Re-run: python main.py --task "..." --task-id abc123
   2. CheckpointStore.resume_or_create("abc123") → finds checkpoint
-  3. State: completed_agents = ["research_agent", "knowledge_agent"]
-  4. Orchestrator skips completed agents, resumes from code_agent
-  5. Zero steps re-executed. Zero duplicate writes.
+  3. state.completed_agents = ["research_agent", "knowledge_agent"]
+  4. _execute_plan() skips completed agents
+  5. Resumes from code_agent — zero re-execution, zero duplicates
 ```
 
-### Scenario B: GitHub MCP returns 500 (server error)
-
+### Scenario B: GitHub MCP returns 500
 ```
 Recovery:
-  1. with_retry decorator catches the error
-  2. Waits 1s → retry 1 → fails again
-  3. Waits 2s → retry 2 → fails again
-  4. Waits 4s → retry 3 → succeeds
-  5. Logged: retry_count=3, total_wait=7s
-  OR if all retries exhausted:
-  6. Fallback: create_github_issue skipped, orchestrator notes failure
-  7. HITL gate: "GitHub issue creation failed. Skip or retry manually?"
+  1. @with_retry catches ConnectionError
+  2. Attempt 1 fails → waits 1.2s (1.0 * 2^0 + jitter)
+  3. Attempt 2 fails → waits 2.4s
+  4. Attempt 3 succeeds → CodeResult validated → checkpoint written
+  OR all 3 fail:
+  5. AgentStepError raised → state.status = "failed" → checkpoint saved
+  6. HITL or manual re-run with --task-id to resume
 ```
 
-### Scenario C: Notion MCP returns malformed JSON
-
+### Scenario C: Notion MCP returns malformed JSON (missing `page_id`)
 ```
 Recovery:
   1. validate_agent_output("knowledge_agent", raw) → ValidationError
-  2. Error logged: "KnowledgeResult missing required field: page_id"
-  3. Retry: knowledge_agent re-runs with corrected prompt
-  4. New output validated → passes
-  5. Checkpoint written ONLY after successful validation
-  (Corrupted output never reaches the checkpoint)
+  2. state.retry_counts["knowledge_agent"] incremented to 1
+  3. Error logged with timestamp to state.error_log
+  4. Agent re-dispatched → new output returned
+  5. validate_agent_output() passes on second attempt
+  6. Checkpoint written ONLY after successful validation
+  (Corrupted output never reaches the checkpoint or the next agent)
 ```
 
-### Scenario D: Groq API rate limit on all sub-agents
-
+### Scenario D: Groq rate limit on all sub-agents
 ```
 Recovery:
   1. All sub-agents hit 429 simultaneously
-  2. Backoff jitter prevents thundering herd:
-     - research_agent waits 2.3s
-     - code_agent waits 1.8s
-     - knowledge_agent waits 2.7s
-  3. Staggered retries succeed
-  4. Total delay: ~3s. User doesn't notice.
+  2. Jitter staggers retry waits:
+     research_agent: 1.8s · code_agent: 2.3s · knowledge_agent: 2.7s
+  3. Staggered retries prevent thundering herd
+  4. Total user-visible delay: ~3s
+```
+
+### Scenario E: HITL rejected by human
+```
+Recovery:
+  1. HITLGate.request_approval() returns False
+  2. Orchestrator marks agent as: { status: "skipped", reason: "HITL rejected" }
+  3. mark_agent_complete() called with the skip result
+  4. Pipeline continues to next agent
+  5. Final summary notes the skip in error_log
 ```
 
 ---
 
-## 13. Tech Stack Summary
+## 18. Environment Variables & Setup
+
+### `.env` (copy from `.env.example`)
+
+```bash
+# Master Orchestrator — Ollama (local)
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_ORCHESTRATOR_MODEL=llama3.3      # or any model pulled in Ollama
+
+# Sub-Agents — Groq
+GROQ_API_KEY=gsk_...
+
+# MCP — GitHub (Code Agent)
+GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...
+
+# MCP — Tavily Search (Research Agent)
+TAVILY_API_KEY=tvly-...
+
+# MCP — Notion (Knowledge Agent)
+NOTION_TOKEN=secret_...
+
+# MCP — Gmail (Comms Agent) — requires Google OAuth token
+GMAIL_OAUTH_TOKEN=ya29...
+
+# Optional: override SQLite checkpoint file path
+# CHECKPOINT_DB_PATH=agent_checkpoints.db
+```
+
+**Missing keys:** `validate_env_keys()` prints a warning and falls back to stub MCP mode — the full pipeline still runs with placeholder data.
+
+### Backend Setup
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in your keys
+```
+
+### Frontend Setup
+
+```bash
+cd frontend
+npm install
+npm run dev            # → http://localhost:5173
+```
+
+### Running
+
+```bash
+# Terminal 1 — backend API
+cd backend && python main.py --serve
+
+# Terminal 2 — frontend
+cd frontend && npm run dev
+
+# Or: CLI only (no frontend)
+cd backend && python main.py --task "Your task here"
+```
+
+---
+
+## 19. Tech Stack Summary
 
 | Component | Technology | Version | Purpose |
 |---|---|---|---|
-| Master Orchestrator LLM | Claude claude-sonnet-4-6 | Anthropic SDK ≥0.40 | Planning, routing, synthesis |
+| Master Orchestrator LLM | Ollama (local) | via OpenAI SDK | Planning, routing, aggregation |
+| Orchestrator SDK | `openai` | ≥1.0.0 | OpenAI-compat client pointed at Ollama |
 | Sub-Agent LLM | llama-3.3-70b-versatile | Groq SDK ≥0.9 | Fast task execution |
-| Agent Orchestration | Custom Python | — | Multi-agent routing logic |
 | State & Checkpointing | SQLite | Built-in | Local durable state storage |
 | Schema Validation | Pydantic v2 | ≥2.5 | Typed output enforcement |
-| Retry Logic | Tenacity | ≥8.2 | Exponential backoff with jitter |
-| MCP — Email | Gmail MCP | Google Cloud | Email read/send |
-| MCP — Code | GitHub MCP | npm (local) | PR, issue, repo interactions |
-| MCP — Knowledge | Notion MCP | Notion Cloud | Page read/write |
-| MCP — Web | Brave Search MCP | npm (local) | Web search + fetch |
-| Structured Logging | Structlog | ≥24.0 | Machine-parseable step logs |
+| Retry Logic | Custom decorator | — | Exponential backoff with jitter |
+| MCP — Search | Tavily MCP | `@tavily/mcp-server` | Web search + URL fetch |
+| MCP — Code | GitHub MCP | `@modelcontextprotocol/server-github` | PR, issue, repo interactions |
+| MCP — Knowledge | Notion MCP | `mcp.notion.com/mcp` | Page read/write |
+| MCP — Email | Gmail MCP | `gmailmcp.googleapis.com` | Email read/send |
+| REST + WS API | FastAPI + Uvicorn | ≥0.110 / ≥0.29 | Backend API for frontend |
+| WebSocket | `websockets` | ≥12.0 | Live task status streaming |
 | Terminal UI | Rich | ≥13.0 | Live agent status dashboard |
+| Frontend Framework | React + Vite | 18.2 / 5.0 | Dashboard SPA |
+| Frontend Styling | TailwindCSS | 3.3.5 | Utility-first CSS |
+| Frontend Icons | Lucide React | 0.292 | Icon set |
 | Entry Point | Python CLI | ≥3.11 | `python main.py --task "..."` |
 
 ---
 
-## 14. Hackathon Demo Plan
+## 20. Hackathon Demo Plan
 
 ### The Adversarial Demo Sequence (5 minutes)
 
-**Minute 1 — Happy path**
-Run: `python main.py --task "Research quantum computing news, save to Notion, post GitHub issue, email team"`
-Show: Rich terminal with live agent status panel (Research ✅ → Knowledge ✅ → Code ✅ → Comms ✅)
+**Minute 1 — Happy path (frontend)**
+- Open `http://localhost:5173`
+- Submit: `"Research quantum computing news, save to Notion, post GitHub issue, email team"`
+- Show: React dashboard — agent cards light up one by one (Research ✅ → Knowledge ✅ → Code ✅ → Comms ✅)
 
-**Minute 2 — Kill mid-task**
-Kill the process at the Knowledge Agent step (Ctrl+C)
-Show: "Process killed. 2 agents completed. Checkpoint saved."
-Re-run with same task-id.
-Show: "Resuming from knowledge_agent. Research results loaded from checkpoint."
-Point out: "Zero re-execution of the Research agent. Zero duplicate API calls."
+**Minute 2 — Kill mid-task (checkpoint recovery)**
+- Kill the backend (`Ctrl+C`) after the Knowledge Agent completes
+- Show: `"Process killed. 2 agents completed. Checkpoint saved."`
+- Re-run with same `--task-id`
+- Show: Rich terminal: `"⏭ Skipping research_agent (already complete)"` `"⏭ Skipping knowledge_agent (already complete)"`
+- Point out: zero re-execution, zero duplicate API calls
 
 **Minute 3 — API failure injection**
-Run with: `--inject-failure github:rate_limit`
-Show: Retry log — "Attempt 1 failed. Waiting 1.8s. Attempt 2 failed. Waiting 3.4s. Attempt 3 success."
-Point out the retry counts and backoff values in the log
+```bash
+python main.py --task "..." --inject-failure github:rate_limit
+```
+- Show: `"⚡ Failure injection: code_agent → rate_limit"`
+- Show: Retry log — backoff wait times printed in terminal
 
 **Minute 4 — Schema validation catch**
-Run with: `--inject-failure notion:malformed_output`
-Show: "ValidationError: KnowledgeResult missing field 'page_id'. Triggering retry."
-Show: "Retry 1 — valid output received. Checkpoint written."
-Point out: "Malformed output never reached the orchestrator."
+```bash
+python main.py --task "..." --inject-failure notion:malformed_output
+```
+- Show: `"⚠ Validation failed for knowledge_agent: ... missing field 'page_id'"`
+- Show: `"→ Dispatching knowledge_agent"` (retry)
+- Show: `"✅ Validated knowledge_agent output"` on second attempt
 
-**Minute 5 — HITL approval**
-Reach the email-send step.
-Show: Terminal prompt: "⚠️ HITL: About to send email to team@company.com. Approve? [y/n]"
-Show what happens when you type 'n' — fallback chain activates.
-Type 'y' — email sent. Show CommsResult in terminal.
+**Minute 5 — HITL approval (CLI)**
+- Reach the email-send step
+- Show: terminal HITL banner: `"⚠️  HITL APPROVAL REQUIRED — Agent: comms_agent"`
+- Type `n` → agent skipped, summary notes it in `error_log`
+- Type `y` → CommsResult returned, checkpoint written
 
-### Demo Metrics Panel (Live in Terminal)
+### Live Metrics Panel (Rich Terminal)
 
 ```
-┌─────────────────── FRAME-MO Live Metrics ───────────────────────┐
-│  Task ID     : abc-123                                          │
-│  Status      : running                                          │
-│                                                                 │
-│  Agent          Status      Retries   Duration   Validated     │
-│  ─────────────────────────────────────────────────────────────  │
-│  research       ✅ done      0         1.2s       ✅            │
-│  knowledge      ✅ done      1         3.4s       ✅            │
-│  code           🔄 running   0         —          —            │
-│  comms          ⏳ pending   —         —          —            │
-│                                                                 │
-│  Checkpoints written : 3                                       │
-│  Validation failures : 1 (caught + recovered)                  │
-│  HITL gates pending  : 1                                       │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────── FRAME-MO Live Metrics ──────────────────────────────┐
+│  Agent          Status        Retries   Validated   Output Key                  │
+│  ────────────────────────────────────────────────────────────────────────────── │
+│  research       ✅ done        0         ✅          query, summary              │
+│  knowledge      ✅ done        1         ✅          action, page_id             │
+│  code           🔄 running     0         —           —                          │
+│  comms          ⏳ pending     —         —           —                          │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 15. References
+## 21. References
 
 1. Andriushchenko et al. (2026). *Towards a Science of AI Agent Reliability.* arXiv:2602.16666.
 2. O'Reilly Radar (2026). *The Hidden Cost of Agentic Failure.* oreilly.com/radar.
-3. Anthropic (2025). *Claude claude-sonnet-4-6 — Tool Use Documentation.* docs.anthropic.com.
-4. Groq Inc. (2025). *Groq API — LLaMA 3.3 Tool Calling.* console.groq.com/docs.
-5. Anthropic (2024). *Model Context Protocol Specification.* modelcontextprotocol.io.
-6. Zylos Research (2026). *AI Agent Workflow Checkpointing and Resumability.* zylos.ai.
-7. Yao, S. et al. (2022). *ReAct: Synergizing Reasoning and Acting in Language Models.* arXiv:2210.03629.
-8. Chandy, K.M. & Lamport, L. (1985). *Distributed Snapshots: Determining Global States.* ACM TOCS.
-9. LangChain Inc. (2025). *LangGraph: Agent Orchestration Framework.* langchain.com/langgraph.
-10. Carnegie Mellon (2025). *Agent Benchmark Results: 30–35% Multi-Step Task Completion.* CMU AI Lab.
-11. McKinsey & Company (2025). *State of AI in Enterprise: 62% experimenting with AI agents.*
-12. Gartner (2025–2026). *Multi-Agent AI Systems Enterprise Guide.* gartner.com.
-13. Fast.io (2026). *AI Agent Tool State Persistence Strategies.* fast.io/resources.
+3. Ollama (2025). *OpenAI-Compatible REST API.* ollama.com/blog/openai-compatibility.
+4. OpenAI SDK (2024). *Client Configuration — base_url override.* platform.openai.com/docs.
+5. Groq Inc. (2025). *Groq API — LLaMA 3.3 Tool Calling.* console.groq.com/docs.
+6. Anthropic (2024). *Model Context Protocol Specification.* modelcontextprotocol.io.
+7. Tavily AI (2025). *Tavily MCP Server.* docs.tavily.com/mcp.
+8. GitHub (2025). *MCP Server for GitHub.* github.com/modelcontextprotocol/servers.
+9. Notion (2025). *Notion MCP Server.* developers.notion.com/docs/mcp.
+10. Google (2025). *Gmail MCP.* developers.google.com/gmail/mcp.
+11. Yao, S. et al. (2022). *ReAct: Synergizing Reasoning and Acting in Language Models.* arXiv:2210.03629.
+12. Chandy, K.M. & Lamport, L. (1985). *Distributed Snapshots: Determining Global States.* ACM TOCS.
+13. FastAPI (2024). *WebSockets.* fastapi.tiangolo.com/advanced/websockets.
+14. Carnegie Mellon (2025). *Agent Benchmark Results: 30–35% Multi-Step Task Completion.* CMU AI Lab.
+15. McKinsey & Company (2025). *State of AI in Enterprise: 62% experimenting with AI agents.*
 
 ---
 
 *FRAME-MO — Fault-Resilient Agentic Multi-Orchestral Engine*
 *Zero to One | Photon 2026 — PS1: AI Systems / Agents*
-*Stack: Claude claude-sonnet-4-6 (Orchestrator) · Groq LLaMA 3.3 (Sub-Agents) · Anthropic SDK · MCP: Gmail + GitHub + Notion + Web*
+*Stack: Ollama (Orchestrator) · Groq LLaMA 3.3 (Sub-Agents) · OpenAI SDK · MCP: Tavily + GitHub + Notion + Gmail · FastAPI + React*
