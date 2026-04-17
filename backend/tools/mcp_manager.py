@@ -151,7 +151,11 @@ class MCPConnectionManager:
             idem_key = self._make_idem_key(server, tool, args)
             if idem_key in self._call_log:
                 log.info(f"[mcp] Idempotency hit — skipping duplicate call: {tool}")
-                return self._call_cache[idem_key]
+                cached = self._call_cache.get(idem_key, {})
+                # Return with idempotency_hit flag so the agent tool loop can break early
+                if isinstance(cached, dict):
+                    return {**cached, "idempotency_hit": True}
+                return {"result": cached, "idempotency_hit": True}
 
         # Execute
         conn = self.connections.get(server)

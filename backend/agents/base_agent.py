@@ -130,15 +130,24 @@ class BaseAgent(ABC):
         message = response.choices[0].message
         self._call_history.append({"role": "assistant", "content": message.content})
 
-        # Tool call loop
-        while message.tool_calls:
+        # Tool call loop — capped at 10 iterations to prevent 429 spirals
+        max_tool_rounds = 10
+        tool_round = 0
+        while message.tool_calls and tool_round < max_tool_rounds:
+            tool_round += 1
             tool_results = []
+            idempotency_hit = False
+
             for tc in message.tool_calls:
                 result = await self._dispatch_tool(
                     tc.function.name,
                     json.loads(tc.function.arguments),
                     state,
                 )
+                # Detect idempotency / stub hits — no point calling Groq again
+                if isinstance(result, dict) and result.get("idempotency_hit"):
+                    idempotency_hit = True
+
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -154,6 +163,28 @@ class BaseAgent(ABC):
                              "tool_calls": message.tool_calls})
             messages.extend(tool_results)
 
+            # If any tool call was an idempotency hit, do one final call
+            # with tool_choice='none' to force the model to emit its JSON output
+            # instead of requesting yet another tool call.
+            if idempotency_hit:
+                log.info(f"[{self.agent_name}] Idempotency hit — forcing final output")
+                try:
+                    final_call = self.groq.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[
+                            {"role": "system", "content": self.system_prompt},
+                            *messages,
+                        ],
+                        tools=tools or None,
+                        tool_choice="none",  # force text output, no more tool calls
+                        temperature=0.1,
+                        max_tokens=2048,
+                    )
+                    message = final_call.choices[0].message
+                except Exception as exc:
+                    log.warning(f"[{self.agent_name}] Final call after idempotency failed: {exc}")
+                break
+
             # Continuation call
             follow_up = self.groq.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -167,6 +198,9 @@ class BaseAgent(ABC):
                 max_tokens=2048,
             )
             message = follow_up.choices[0].message
+
+        if tool_round >= max_tool_rounds:
+            log.warning(f"[{self.agent_name}] Tool loop capped at {max_tool_rounds} rounds")
 
         # Parse final JSON response
         content = message.content or "{}"

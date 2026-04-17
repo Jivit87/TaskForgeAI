@@ -15,22 +15,7 @@ const AGENT_INFO = {
   comms_agent:     { name: 'Comms Agent',     icon: Mail },
 };
 
-function emptyMetrics() {
-  return {
-    completed_agents: [],
-    current_agent:    null,
-    error_count:      0,
-    hitl_pending:     [],
-    agent_results:    {},
-    retry_counts:     {},
-    saga_log:         [],
-    pei_violations:   [],
-    direct_reply:     '',
-    intent_type:      'task',
-  };
-}
-
-// ── Components ─────────────────────────────────────────────────────────────────
+// ── Small components ───────────────────────────────────────────────────────────
 
 const AgentLogLine = ({ agentId, status, retryCount }) => {
   const info = AGENT_INFO[agentId] || { name: agentId, icon: Blocks };
@@ -55,6 +40,162 @@ const AgentLogLine = ({ agentId, status, retryCount }) => {
   );
 };
 
+// ── ChatBubble: renders one turn in the conversation ──────────────────────────
+
+const ChatBubble = ({ turn, onHITL }) => {
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [hitlLoading, setHitlLoading] = useState(false);
+
+  if (turn.role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="bg-[#f3f4f6] text-slate-900 px-5 py-3.5 rounded-2xl rounded-tr-sm max-w-[85%] text-[15.5px] leading-relaxed break-words shadow-sm">
+          {turn.content}
+        </div>
+      </div>
+    );
+  }
+
+  // assistant turn
+  const { metrics, result, status } = turn;
+  const isConversation = turn.intent_type === 'conversation' || result?.intent_type === 'conversation';
+  const hasAgentWork   = (metrics?.completed_agents?.length ?? 0) > 0 || metrics?.current_agent;
+  const replyText      = metrics?.direct_reply || result?.summary || '';
+  const isRunning      = status === 'running' || status === 'started';
+  const isFailed       = status === 'failed';
+
+  const handleHITLClick = async (approved) => {
+    if (hitlLoading) return;
+    setHitlLoading(true);
+    try { await onHITL(turn.task_id, approved); }
+    finally { setHitlLoading(false); }
+  };
+
+  return (
+    <div className="flex gap-4 items-start">
+      <div className="w-8 h-8 rounded-full bg-[#d97757] text-white flex items-center justify-center shrink-0 mt-1 shadow-sm">
+        <Blocks size={16} />
+      </div>
+
+      <div className="flex-1 flex flex-col gap-3 min-w-0 pt-1.5">
+
+        {/* Tool Execution Block */}
+        {!isConversation && hasAgentWork && (
+          <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm max-w-[480px]">
+            <button
+              onClick={() => setLogsExpanded(!logsExpanded)}
+              className="w-full flex items-center gap-2 px-3 py-2.5 bg-slate-50/50 hover:bg-slate-100/50 text-slate-600 text-[13px] font-medium transition-colors"
+            >
+              {logsExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <Workflow size={14} className="text-[#d97757]" />
+              {status === 'complete' ? 'Used tools' : status === 'rolling_back' ? 'Rolling back...' : 'Using tools...'}
+            </button>
+            {logsExpanded && (
+              <div className="flex flex-col border-t border-slate-100 bg-white py-1">
+                {metrics?.completed_agents?.map(ag => (
+                  <AgentLogLine key={ag} agentId={ag} status="complete" retryCount={metrics.retry_counts?.[ag]} />
+                ))}
+                {metrics?.current_agent && (
+                  <AgentLogLine agentId={metrics.current_agent} status="running" retryCount={metrics.retry_counts?.[metrics.current_agent]} />
+                )}
+                {!metrics?.current_agent && isRunning && (metrics?.completed_agents?.length ?? 0) === 0 && (
+                  <div className="flex items-center gap-2 text-sm py-2 px-3 text-slate-500">
+                    <Loader2 size={14} className="animate-spin" /> Planning...
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Saga Rollback */}
+        {(metrics?.saga_log?.length ?? 0) > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 max-w-[480px]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <Undo2 size={14} className="text-amber-600" />
+              <span className="text-[13px] font-semibold text-amber-800">Saga Rollback</span>
+            </div>
+            {metrics.saga_log.map((entry, i) => (
+              <div key={i} className="text-xs text-amber-700 flex items-center gap-1.5 py-0.5">
+                {entry.success ? <CheckCircle2 size={11} className="text-green-500" /> : <XCircle size={11} className="text-red-500" />}
+                <span className="font-medium">{entry.agent}:</span> {entry.action}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* PEI Violations */}
+        {(metrics?.pei_violations?.length ?? 0) > 0 && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 max-w-[480px]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <ShieldAlert size={14} className="text-red-600" />
+              <span className="text-[13px] font-semibold text-red-800">Safety Monitor</span>
+            </div>
+            {metrics.pei_violations.map((v, i) => (
+              <div key={i} className="text-xs text-red-700 py-0.5">
+                <span className="font-medium">{v.agent}:</span> {v.violation}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* HITL Approval */}
+        {(metrics?.hitl_pending?.length ?? 0) > 0 && isRunning && (
+          <div className="bg-amber-50/80 border border-amber-200/60 rounded-xl p-4 text-amber-900 max-w-full">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle size={16} className="text-amber-600" />
+              <h4 className="font-semibold text-sm">Action Needs Approval</h4>
+            </div>
+            {metrics.hitl_pending.map((req, i) => (
+              <div key={i} className="text-xs font-mono bg-white border border-amber-100 p-2.5 rounded-lg mb-3">
+                <span className="font-semibold text-amber-700">{req.action?.tool || 'Tool'}</span>
+                <div className="text-slate-600 truncate mt-1">Input: {JSON.stringify(req.action?.input || {})}</div>
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <button onClick={() => handleHITLClick(true)} disabled={hitlLoading} className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-md text-[13px] font-medium transition disabled:opacity-50">Approve</button>
+              <button onClick={() => handleHITLClick(false)} disabled={hitlLoading} className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-amber-200 text-amber-700 rounded-md text-[13px] font-medium transition disabled:opacity-50">Reject</button>
+            </div>
+          </div>
+        )}
+
+        {/* Loading pulse while running */}
+        {isRunning && !replyText && !hasAgentWork && (
+          <div className="flex items-center gap-2 text-slate-500 text-sm">
+            <Loader2 size={14} className="animate-spin" /> Thinking...
+          </div>
+        )}
+
+        {/* Task running — plain spinner (conversation path) */}
+        {isRunning && isConversation && !replyText && (
+          <div className="flex items-center gap-2 text-slate-500 text-sm">
+            <Loader2 size={14} className="animate-spin" /> Thinking...
+          </div>
+        )}
+
+        {/* Final response text */}
+        {replyText && status === 'complete' && (
+          <div className="prose prose-slate prose-sm sm:prose-base max-w-none text-slate-800 leading-relaxed mt-1">
+            <p className="whitespace-pre-wrap">{replyText}</p>
+            {result?.highlights?.length > 0 && (
+              <ul className="mt-2 space-y-1 pl-4">
+                {result.highlights.map((h, idx) => <li key={idx}>{h}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Error */}
+        {isFailed && (
+          <div className="text-red-600 text-[15px] flex items-center gap-2 mt-2">
+            <XCircle size={16} /> Task failed — check agent logs above.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ── App ────────────────────────────────────────────────────────────────────────
 
 const App = () => {
@@ -63,17 +204,20 @@ const App = () => {
   const [inputText, setInputText]       = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const [activeTask, setActiveTask]     = useState(null);
-  const [liveMetrics, setLiveMetrics]   = useState(emptyMetrics());
-  const [finalResult, setFinalResult]   = useState(null);
+  // Chat history — list of { role, content, ...extra }
+  const [messages, setMessages]         = useState([]);
+
+  // Active in-flight task (null when idle)
+  const [activeTaskId, setActiveTaskId] = useState(null);
+
   const [sessions, setSessions]         = useState([]);
   const [mcpHealth, setMcpHealth]       = useState({});
-  const [hitlLoading, setHitlLoading]   = useState(false);
-  const [agentLogsExpanded, setAgentLogsExpanded] = useState(true);
 
-  const wsRef           = useRef(null);
-  const wsReconnects    = useRef(0);
-  const messagesEndRef  = useRef(null);
+  const wsRef         = useRef(null);
+  const wsReconnects  = useRef(0);
+  const messagesEndRef = useRef(null);
+
+  // ── Fetch helpers ───────────────────────────────────────────────────────────
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -96,8 +240,18 @@ const App = () => {
     return () => clearInterval(interval);
   }, [fetchSessions, fetchMcpHealth]);
 
+  // ── Auto-scroll ─────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // ── WebSocket ───────────────────────────────────────────────────────────────
+
   const connectWs = useCallback((taskId) => {
     if (wsRef.current) wsRef.current.close(1000);
+    wsReconnects.current = 0;
+
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${protocol}://${window.location.host}/ws/${taskId}`);
 
@@ -105,37 +259,53 @@ const App = () => {
       const data = JSON.parse(event.data);
 
       if (data.event === 'status') {
-        setLiveMetrics(prev => ({
-          completed_agents: data.completed_agents ?? prev.completed_agents,
-          current_agent:    data.current_agent    ?? null,
-          error_count:      data.error_count      ?? prev.error_count,
-          hitl_pending:     data.hitl_pending     ?? prev.hitl_pending,
-          agent_results:    data.agent_results    ?? prev.agent_results,
-          retry_counts:     data.retry_counts     ?? prev.retry_counts,
-          saga_log:         data.saga_log         ?? prev.saga_log,
-          pei_violations:   data.pei_violations   ?? prev.pei_violations,
-          direct_reply:     data.direct_reply     ?? prev.direct_reply,
-          intent_type:      data.intent_type      ?? prev.intent_type,
-        }));
-        if (data.status) setActiveTask(t => t ? { ...t, status: data.status } : null);
+        // Update the live assistant bubble for this task
+        setMessages(prev => prev.map(m =>
+          m.role === 'assistant' && m.task_id === taskId
+            ? {
+                ...m,
+                status: data.status ?? m.status,
+                metrics: {
+                  completed_agents: data.completed_agents ?? m.metrics?.completed_agents ?? [],
+                  current_agent:    data.current_agent    ?? null,
+                  error_count:      data.error_count      ?? m.metrics?.error_count ?? 0,
+                  hitl_pending:     data.hitl_pending     ?? m.metrics?.hitl_pending ?? [],
+                  agent_results:    data.agent_results    ?? m.metrics?.agent_results ?? {},
+                  retry_counts:     data.retry_counts     ?? m.metrics?.retry_counts ?? {},
+                  saga_log:         data.saga_log         ?? m.metrics?.saga_log ?? [],
+                  pei_violations:   data.pei_violations   ?? m.metrics?.pei_violations ?? [],
+                  direct_reply:     data.direct_reply     ?? m.metrics?.direct_reply ?? '',
+                  intent_type:      data.intent_type      ?? m.metrics?.intent_type ?? 'task',
+                },
+                intent_type: data.intent_type ?? m.intent_type,
+              }
+            : m
+        ));
       }
 
       if (data.event === 'complete' && data.result) {
-        setFinalResult(data.result);
-        setActiveTask(t => t ? { ...t, status: 'complete' } : null);
-        setAgentLogsExpanded(false);
+        setMessages(prev => prev.map(m =>
+          m.role === 'assistant' && m.task_id === taskId
+            ? { ...m, status: 'complete', result: data.result, intent_type: data.result.intent_type }
+            : m
+        ));
+        setActiveTaskId(null);   // ← unblock input
         fetchSessions();
       }
 
       if (data.event === 'error') {
-        setActiveTask(t => t ? { ...t, status: 'failed' } : null);
+        setMessages(prev => prev.map(m =>
+          m.role === 'assistant' && m.task_id === taskId
+            ? { ...m, status: 'failed' }
+            : m
+        ));
+        setActiveTaskId(null);   // ← unblock input even on error
         fetchSessions();
       }
 
-      // Stop reconnecting on terminal states
-      // Stop reconnecting on terminal states
       if (data.event === 'terminal') {
-        wsReconnects.current = 99; // prevent reconnect
+        wsReconnects.current = 99; // prevent further reconnects
+        setActiveTaskId(null);
       }
     };
 
@@ -147,26 +317,18 @@ const App = () => {
     };
 
     wsRef.current = ws;
-    wsReconnects.current = 0;
   }, [fetchSessions]);
 
-  useEffect(() => {
-    if (!activeTask?.id || activeTask.id === 'pending') return;
-    if (['complete', 'failed'].includes(activeTask.status)) return;
-    connectWs(activeTask.id);
-    return () => { if (wsRef.current) wsRef.current.close(1000); };
-  }, [activeTask?.id, connectWs]);
+  // ── Submit ──────────────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [liveMetrics, finalResult]);
   const handleSubmit = async () => {
-    if (!inputText.trim() || isSubmitting) return;
+    if (!inputText.trim() || isSubmitting || activeTaskId) return;
     setIsSubmitting(true);
     const goal = inputText.trim();
     setInputText('');
-    setFinalResult(null);
-    setAgentLogsExpanded(true);
+
+    // Add user bubble immediately
+    setMessages(prev => [...prev, { role: 'user', content: goal }]);
 
     try {
       const res = await fetch('/tasks', {
@@ -176,60 +338,47 @@ const App = () => {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setActiveTask({ id: data.task_id, goal: data.goal, status: data.status });
-      setLiveMetrics(emptyMetrics());
+
+      // Add live assistant bubble
+      setMessages(prev => [...prev, {
+        role:        'assistant',
+        task_id:     data.task_id,
+        status:      'running',
+        intent_type: 'task',
+        metrics:     {
+          completed_agents: [],
+          current_agent:    null,
+          error_count:      0,
+          hitl_pending:     [],
+          agent_results:    {},
+          retry_counts:     {},
+          saga_log:         [],
+          pei_violations:   [],
+          direct_reply:     '',
+          intent_type:      'task',
+        },
+        result: null,
+      }]);
+
+      setActiveTaskId(data.task_id);
+      connectWs(data.task_id);
     } catch (err) {
-      alert(`Could not connect to the FRAME-MO backend.\nError: ${err.message}`);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        task_id: null,
+        status: 'failed',
+        content: `Connection error: ${err.message}`,
+      }]);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const clearTask = () => {
-    if (wsRef.current) wsRef.current.close(1000);
-    setActiveTask(null);
-    setLiveMetrics(emptyMetrics());
-    setFinalResult(null);
-    setInputText('');
-  };
+  // ── HITL ────────────────────────────────────────────────────────────────────
 
-  const handleSessionClick = async (session) => {
-    if (wsRef.current) wsRef.current.close(1000);
-    setFinalResult(null);
-    setLiveMetrics(emptyMetrics());
-    setAgentLogsExpanded(session.status !== 'complete');
-
+  const handleHITL = async (taskId, approved) => {
     try {
-      const res = await fetch(`/tasks/${session.task_id}`);
-      if (res.ok) {
-        const status = await res.json();
-        setActiveTask({ id: status.task_id, goal: status.goal, status: status.status });
-        setLiveMetrics(prev => ({
-          ...prev,
-          completed_agents: status.completed_agents || [],
-          current_agent:    status.current_agent    || null,
-          error_count:      status.error_count      || 0,
-          hitl_pending:     status.hitl_pending     || [],
-          retry_counts:     status.retry_counts     || {},
-          saga_log:         status.saga_log         || [],
-          pei_violations:   status.pei_violations   || [],
-          direct_reply:     status.direct_reply     || '',
-          intent_type:      status.intent_type      || 'task',
-        }));
-        if (!['complete', 'failed'].includes(status.status)) {
-          connectWs(status.task_id);
-        }
-        return;
-      }
-    } catch (_) {}
-    setActiveTask({ id: session.task_id, goal: session.goal_preview, status: session.status });
-  };
-
-  const handleHITL = async (approved) => {
-    if (!activeTask?.id || hitlLoading) return;
-    setHitlLoading(true);
-    try {
-      const res = await fetch(`/tasks/${activeTask.id}/hitl`, {
+      const res = await fetch(`/tasks/${taskId}/hitl`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ approved }),
@@ -237,15 +386,72 @@ const App = () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (e) {
       alert(`Failed to submit decision: ${e.message}`);
-    } finally {
-      setHitlLoading(false);
     }
   };
 
-  const isTaskActive = activeTask && !['complete', 'failed'].includes(activeTask.status);
-  const isConversation = liveMetrics.intent_type === 'conversation' || finalResult?.intent_type === 'conversation';
-  const hasAgentWork = liveMetrics.completed_agents.length > 0 || liveMetrics.current_agent;
-  const directReply = liveMetrics.direct_reply || finalResult?.summary || '';
+  // ── New chat ────────────────────────────────────────────────────────────────
+
+  const startNewChat = () => {
+    if (wsRef.current) wsRef.current.close(1000);
+    setMessages([]);
+    setActiveTaskId(null);
+    setInputText('');
+  };
+
+  // ── Load session from sidebar ───────────────────────────────────────────────
+
+  const handleSessionClick = async (session) => {
+    if (wsRef.current) wsRef.current.close(1000);
+    setActiveTaskId(null);
+    setInputText('');
+
+    try {
+      const res = await fetch(`/tasks/${session.task_id}`);
+      if (res.ok) {
+        const status = await res.json();
+        setMessages([
+          { role: 'user', content: status.goal },
+          {
+            role:        'assistant',
+            task_id:     status.task_id,
+            status:      status.status,
+            intent_type: status.intent_type,
+            metrics: {
+              completed_agents: status.completed_agents || [],
+              current_agent:    status.current_agent    || null,
+              error_count:      status.error_count      || 0,
+              hitl_pending:     status.hitl_pending     || [],
+              agent_results:    {},
+              retry_counts:     status.retry_counts     || {},
+              saga_log:         status.saga_log         || [],
+              pei_violations:   status.pei_violations   || [],
+              direct_reply:     status.direct_reply     || '',
+              intent_type:      status.intent_type      || 'task',
+            },
+            result: status.status === 'complete' ? {
+              summary:    status.direct_reply || '',
+              highlights: [],
+              intent_type: status.intent_type,
+            } : null,
+          },
+        ]);
+
+        if (!['complete', 'failed'].includes(status.status)) {
+          setActiveTaskId(status.task_id);
+          connectWs(status.task_id);
+        }
+        return;
+      }
+    } catch (_) {}
+
+    setMessages([{ role: 'user', content: session.goal_preview }]);
+  };
+
+  // ── Derived ─────────────────────────────────────────────────────────────────
+
+  const isBlocked = !!activeTaskId || isSubmitting;
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-[100dvh] bg-white text-slate-800 font-sans">
@@ -254,7 +460,7 @@ const App = () => {
       {sidebarOpen && (
         <div className="w-[260px] bg-[#f9f9f9] border-r border-[#e5e5e5] flex flex-col shrink-0">
           <div className="p-3 flex items-center justify-between">
-            <button onClick={clearTask} className="flex items-center gap-2 px-3 py-2 text-sm font-medium hover:bg-slate-200/50 rounded-md text-slate-700">
+            <button onClick={startNewChat} className="flex items-center gap-2 px-3 py-2 text-sm font-medium hover:bg-slate-200/50 rounded-md text-slate-700">
               <div className="w-5 h-5 bg-white shadow-sm border border-slate-200 text-[#d97757] flex items-center justify-center rounded">
                 <Blocks size={12} />
               </div>
@@ -266,7 +472,7 @@ const App = () => {
           </div>
 
           <div className="px-3 pb-2 pt-1">
-            <button onClick={clearTask} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-md shadow-sm">
+            <button onClick={startNewChat} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-md shadow-sm">
               <Plus size={16} /> New chat
             </button>
           </div>
@@ -277,7 +483,7 @@ const App = () => {
               <button
                 key={s.task_id}
                 onClick={() => handleSessionClick(s)}
-                className={`w-full text-left px-3 py-2 text-sm rounded-md transition-colors mb-0.5 ${activeTask?.id === s.task_id ? 'bg-[#ebebeb] font-medium' : 'hover:bg-[#ebebeb]'}`}
+                className="w-full text-left px-3 py-2 text-sm rounded-md transition-colors mb-0.5 hover:bg-[#ebebeb]"
               >
                 <p className="truncate text-slate-700 max-w-[200px]">{s.goal_preview}</p>
               </button>
@@ -306,8 +512,9 @@ const App = () => {
           </div>
         )}
 
+        {/* Message thread */}
         <div className="flex-1 overflow-y-auto w-full">
-          {!activeTask ? (
+          {messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center px-4">
               <div className="w-12 h-12 bg-[#f4ece9] text-[#d97757] rounded-xl flex items-center justify-center mb-5">
                 <Blocks size={24} />
@@ -316,148 +523,27 @@ const App = () => {
               <p className="text-slate-500 text-[15px] mb-8">Agentic web research, codebase queries, or automated communications.</p>
             </div>
           ) : (
-            <div className="max-w-3xl mx-auto w-full py-8 px-4 flex flex-col gap-6 pb-32">
-
-              {/* User Message */}
-              <div className="flex justify-end pt-4">
-                <div className="bg-[#f3f4f6] text-slate-900 px-5 py-3.5 rounded-2xl rounded-tr-sm max-w-[85%] text-[15.5px] leading-relaxed break-words shadow-sm">
-                  {activeTask.goal}
-                </div>
-              </div>
-
-              {/* AI Response */}
-              <div className="flex gap-4 items-start pb-8">
-                <div className="w-8 h-8 rounded-full bg-[#d97757] text-white flex items-center justify-center shrink-0 mt-1 shadow-sm">
-                  <Blocks size={16} />
-                </div>
-
-                <div className="flex-1 flex flex-col gap-3 min-w-0 pt-1.5">
-
-                  {/* Tool Execution Block — only for task intent */}
-                  {!isConversation && hasAgentWork && (
-                    <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm max-w-[480px]">
-                      <button
-                        onClick={() => setAgentLogsExpanded(!agentLogsExpanded)}
-                        className="w-full flex items-center gap-2 px-3 py-2.5 bg-slate-50/50 hover:bg-slate-100/50 text-slate-600 text-[13px] font-medium transition-colors"
-                      >
-                        {agentLogsExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        <Workflow size={14} className="text-[#d97757]" />
-                        {activeTask.status === 'complete' ? 'Used tools' : activeTask.status === 'rolling_back' ? 'Rolling back...' : 'Using tools...'}
-                      </button>
-
-                      {agentLogsExpanded && (
-                        <div className="flex flex-col border-t border-slate-100 bg-white py-1">
-                          {liveMetrics.completed_agents.map(ag => (
-                            <AgentLogLine key={ag} agentId={ag} status="complete" retryCount={liveMetrics.retry_counts[ag]} />
-                          ))}
-                          {liveMetrics.current_agent && (
-                            <AgentLogLine agentId={liveMetrics.current_agent} status="running" retryCount={liveMetrics.retry_counts[liveMetrics.current_agent]} />
-                          )}
-                          {!liveMetrics.current_agent && activeTask.status === 'running' && liveMetrics.completed_agents.length === 0 && (
-                            <div className="flex items-center gap-2 text-sm py-2 px-3 text-slate-500">
-                              <Loader2 size={14} className="animate-spin" /> Planning...
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Saga Rollback Indicator */}
-                  {liveMetrics.saga_log.length > 0 && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 max-w-[480px]">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <Undo2 size={14} className="text-amber-600" />
-                        <span className="text-[13px] font-semibold text-amber-800">Saga Rollback</span>
-                      </div>
-                      {liveMetrics.saga_log.map((entry, i) => (
-                        <div key={i} className="text-xs text-amber-700 flex items-center gap-1.5 py-0.5">
-                          {entry.success ? <CheckCircle2 size={11} className="text-green-500" /> : <XCircle size={11} className="text-red-500" />}
-                          <span className="font-medium">{entry.agent}:</span> {entry.action}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* PEI Violations */}
-                  {liveMetrics.pei_violations.length > 0 && (
-                    <div className="bg-red-50 border border-red-200 rounded-xl p-3 max-w-[480px]">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <ShieldAlert size={14} className="text-red-600" />
-                        <span className="text-[13px] font-semibold text-red-800">Safety Monitor</span>
-                      </div>
-                      {liveMetrics.pei_violations.map((v, i) => (
-                        <div key={i} className="text-xs text-red-700 py-0.5">
-                          <span className="font-medium">{v.agent}:</span> {v.violation}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* HITL Approval */}
-                  {liveMetrics.hitl_pending?.length > 0 && (
-                    <div className="bg-amber-50/80 border border-amber-200/60 rounded-xl p-4 text-amber-900 max-w-full">
-                      <div className="flex items-center gap-2 mb-2">
-                        <AlertCircle size={16} className="text-amber-600" />
-                        <h4 className="font-semibold text-sm">Action Needs Approval</h4>
-                      </div>
-                      {liveMetrics.hitl_pending.map((req, i) => (
-                        <div key={i} className="text-xs font-mono bg-white border border-amber-100 p-2.5 rounded-lg mb-3">
-                          <span className="font-semibold text-amber-700">{req.action?.tool || 'Tool'}</span>
-                          <div className="text-slate-600 truncate mt-1">Input: {JSON.stringify(req.action?.input || {})}</div>
-                        </div>
-                      ))}
-                      <div className="flex gap-2">
-                        <button onClick={() => handleHITL(true)} disabled={hitlLoading} className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-md text-[13px] font-medium transition disabled:opacity-50">Approve</button>
-                        <button onClick={() => handleHITL(false)} disabled={hitlLoading} className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-amber-200 text-amber-700 rounded-md text-[13px] font-medium transition disabled:opacity-50">Reject</button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Final AI Response — works for BOTH conversation and task modes */}
-                  {directReply && activeTask.status === 'complete' && (
-                    <div className="prose prose-slate prose-sm sm:prose-base max-w-none text-slate-800 leading-relaxed mt-1">
-                      <p className="whitespace-pre-wrap">{directReply}</p>
-                      {finalResult?.highlights?.length > 0 && (
-                        <ul className="mt-2 space-y-1 pl-4">
-                          {finalResult.highlights.map((h, idx) => <li key={idx}>{h}</li>)}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Loading state for conversation */}
-                  {isConversation && !directReply && activeTask.status !== 'complete' && (
-                    <div className="flex items-center gap-2 text-slate-500 text-sm">
-                      <Loader2 size={14} className="animate-spin" /> Thinking...
-                    </div>
-                  )}
-
-                  {/* Error */}
-                  {activeTask.status === 'failed' && (
-                    <div className="text-red-600 text-[15px] flex items-center gap-2 mt-2">
-                      <XCircle size={16} /> Error completing task.
-                    </div>
-                  )}
-                </div>
-              </div>
+            <div className="max-w-3xl mx-auto w-full py-8 px-4 flex flex-col gap-6 pb-40">
+              {messages.map((msg, idx) => (
+                <ChatBubble key={idx} turn={msg} onHITL={handleHITL} />
+              ))}
               <div ref={messagesEndRef} className="h-4" />
             </div>
           )}
         </div>
 
-        {/* Input Bar */}
+        {/* Input Bar — always unlocked unless a task is actively running */}
         <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-white via-white to-transparent pt-8 pb-6 px-4">
           <div className="max-w-3xl mx-auto">
-            <div className={`relative flex flex-col bg-white rounded-2xl border shadow-sm transition-all focus-within:ring-2 focus-within:ring-[#d97757]/20 focus-within:border-[#d97757]/50 ${isTaskActive ? 'opacity-70 pointer-events-none border-slate-200' : 'border-slate-300'}`}>
+            <div className={`relative flex flex-col bg-white rounded-2xl border shadow-sm transition-all focus-within:ring-2 focus-within:ring-[#d97757]/20 focus-within:border-[#d97757]/50 ${isBlocked ? 'opacity-60 border-slate-200' : 'border-slate-300'}`}>
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
                 }}
-                disabled={isSubmitting || isTaskActive}
-                placeholder={isTaskActive ? "Generating..." : "Message FRAME-MO..."}
+                disabled={isBlocked}
+                placeholder={isBlocked ? 'Waiting for response...' : 'Message FRAME-MO...'}
                 rows={2}
                 className="w-full resize-none bg-transparent px-4 py-3.5 pr-12 text-[15px] leading-relaxed outline-none text-slate-800 placeholder-slate-400 disabled:opacity-50"
               />
@@ -467,10 +553,10 @@ const App = () => {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={!inputText.trim() || isSubmitting || isTaskActive}
+                  disabled={!inputText.trim() || isBlocked}
                   className={`p-1.5 rounded-xl flex items-center justify-center transition-all ${
-                    inputText.trim() && !isSubmitting && !isTaskActive
-                      ? 'bg-black text-white shadow-sm'
+                    inputText.trim() && !isBlocked
+                      ? 'bg-black text-white shadow-sm hover:bg-slate-800'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   }`}
                 >

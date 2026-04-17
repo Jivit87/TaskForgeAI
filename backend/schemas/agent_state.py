@@ -35,6 +35,7 @@ class AgentState:
     saga_log: list = field(default_factory=list)          # compensating actions taken
     pei_violations: list = field(default_factory=list)    # PEI monitor flags
     direct_reply: str = ""                                # LLM reply for conversation mode
+    final_result: dict = field(default_factory=dict)      # cached final aggregated result
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     status: Literal[

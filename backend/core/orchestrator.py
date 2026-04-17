@@ -28,6 +28,7 @@ import openai
 from core.checkpoint import CheckpointStore
 from core.hitl import HITLGate
 from core.ltl_verifier import verify_plan
+from core.memory import ConversationMemory
 from core.pei_monitor import PEIMonitor
 from core.saga import SagaEngine
 from schemas.agent_state import AgentState
@@ -121,6 +122,7 @@ class MasterOrchestrator:
         checkpoint_store: CheckpointStore | None = None,
         mcp_manager: MCPConnectionManager | None = None,
         inject_failures: dict | None = None,
+        memory: ConversationMemory | None = None,
     ):
         base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         self.client = openai.OpenAI(
@@ -131,6 +133,9 @@ class MasterOrchestrator:
 
         self.checkpoint = checkpoint_store or CheckpointStore()
         self.mcp = mcp_manager or MCPConnectionManager()
+        self.memory = memory or ConversationMemory(
+            db_path=self.checkpoint.db_path
+        )
         self.hitl = HITLGate(self.checkpoint)
         self.pei = PEIMonitor()
         self.saga = SagaEngine(self.checkpoint)
@@ -167,16 +172,22 @@ class MasterOrchestrator:
 
         try:
             # Step 1 — Planning (includes intent classification)
+            # User turn is added to memory AFTER planning so that build_context_messages()
+            # returns only *prior* history — the current goal is injected fresh in _plan().
             if not state.execution_plan and not state.direct_reply:
                 state = await self._plan(goal, state)
                 self.checkpoint.save(state)
 
+            # Now record the user turn (after planning so it's not in history yet)
+            self.memory.add_user_turn(
+                content=goal,
+                turn_type="task_request" if state.intent_type == "task" else "conversation",
+                task_id=task_id,
+            )
+
             # Fast-path: conversation mode
             if state.intent_type == "conversation":
-                state.status = "complete"
-                self.checkpoint.save(state)
-                log.info(f"[orchestrator] ✅ Conversation reply  task_id={task_id}")
-                return {
+                conv_result = {
                     "status": "complete",
                     "task_id": task_id,
                     "goal": goal,
@@ -190,6 +201,21 @@ class MasterOrchestrator:
                     "saga_log": [],
                     "completed_at": datetime.utcnow().isoformat(),
                 }
+                state.final_result = conv_result
+                state.status = "complete"
+                self.checkpoint.save(state)
+
+                # Record reply in memory
+                self.memory.add_assistant_turn(
+                    content=state.direct_reply,
+                    turn_type="conversation",
+                    task_id=task_id,
+                )
+                # Auto-summarize if window overflowed
+                self.memory.maybe_summarize(self.client, self.model)
+
+                log.info(f"[orchestrator] ✅ Conversation reply  task_id={task_id}")
+                return conv_result
 
             # Step 2 — LTL Verification
             if state.execution_plan:
@@ -218,8 +244,28 @@ class MasterOrchestrator:
             # Step 4 — Aggregate
             final = await self._aggregate(state)
 
+            # Save result into state so late WS connections can read it
+            state.final_result = final
             state.status = "complete"
             self.checkpoint.save(state)
+
+            # Record task result in memory
+            summary_text = final.get("summary", "Task completed.")
+            self.memory.add_assistant_turn(
+                content=summary_text,
+                turn_type="task_result",
+                task_id=task_id,
+            )
+            self.memory.add_task_episode(
+                task_id=task_id,
+                goal=goal,
+                outcome=summary_text[:300],
+                agents_used=state.completed_agents,
+                status="complete",
+            )
+            # Auto-summarize if window overflowed
+            self.memory.maybe_summarize(self.client, self.model)
+
             log.info(f"[orchestrator] ✅ Task complete  task_id={task_id}")
             return final
 
@@ -242,6 +288,20 @@ class MasterOrchestrator:
             state.status = "failed"
             state.log_error("orchestrator", str(exc))
             self.checkpoint.save(state)
+
+            # Record failure in memory
+            self.memory.add_assistant_turn(
+                content=f"Task failed: {str(exc)[:200]}",
+                turn_type="task_result",
+                task_id=task_id,
+            )
+            self.memory.add_task_episode(
+                task_id=task_id,
+                goal=goal,
+                outcome=f"Failed: {str(exc)[:200]}",
+                agents_used=state.completed_agents,
+                status="failed",
+            )
             raise
 
     # ── Step 1: Planning + Intent Classification ──────────────────────────────
@@ -260,10 +320,21 @@ class MasterOrchestrator:
             "{{AGENT_TABLE}}", self._agent_table
         )
 
+        # Build messages: prior history (from memory) + the current user goal.
+        # IMPORTANT: add_user_turn() is called AFTER _plan() returns, so
+        # build_context_messages() only returns prior turns — no duplication.
+        history = self.memory.build_context_messages()
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": goal},
+            *history,                                   # prior context only
+            {"role": "user", "content": goal},         # current message (always last)
         ]
+
+        log.debug(
+            f"[orchestrator] Planning with {len(history)} history messages "
+            f"({self.memory.get_total_turns()} prior turns stored)"
+        )
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -550,4 +621,5 @@ class MasterOrchestrator:
             "saga_log":          state.saga_log,
             "pei_violations":    state.pei_violations,
             "direct_reply":      state.direct_reply,
+            "final_result":      state.final_result or {},
         }

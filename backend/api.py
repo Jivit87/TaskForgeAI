@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.checkpoint import CheckpointStore
+from core.memory import ConversationMemory
 from core.orchestrator import MasterOrchestrator
 from tools.mcp_manager import MCPConnectionManager
 
@@ -40,7 +41,10 @@ checkpoint = CheckpointStore(
     db_path=os.environ.get("CHECKPOINT_DB_PATH", "agent_checkpoints.db")
 )
 mcp = MCPConnectionManager()
-orchestrator = MasterOrchestrator(checkpoint_store=checkpoint, mcp_manager=mcp)
+memory = ConversationMemory(db_path=checkpoint.db_path)
+orchestrator = MasterOrchestrator(
+    checkpoint_store=checkpoint, mcp_manager=mcp, memory=memory
+)
 
 # Active WebSocket connections: task_id → list[WebSocket]
 _ws_clients: dict[str, list[WebSocket]] = {}
@@ -103,6 +107,7 @@ async def start_task(req: StartTaskRequest):
         checkpoint_store=checkpoint,
         mcp_manager=mcp,
         inject_failures=inject,
+        memory=memory,
     )
 
     async def _run_and_broadcast():
@@ -159,7 +164,25 @@ async def mcp_health():
 
 @app.get("/health", summary="API health check")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.1.0"}
+
+
+@app.get("/memory", summary="Conversation memory state")
+async def get_memory():
+    """Return the current conversation memory context for debugging."""
+    return {
+        "total_turns": memory.get_total_turns(),
+        "recent_turns": memory.get_recent_turns(),
+        "latest_summary": memory.get_latest_summary(),
+        "task_episodes": memory.get_task_episodes(),
+    }
+
+
+@app.delete("/memory", summary="Clear conversation memory")
+async def clear_memory():
+    """Reset all conversation memory."""
+    memory.clear()
+    return {"status": "cleared"}
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -174,7 +197,39 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
         # Send current state immediately on connect
         status = orchestrator.get_live_status(task_id)
         if status:
-            await websocket.send_text(json.dumps({"event": "status", **status}))
+            await websocket.send_text(json.dumps({"event": "status", **status}, default=str))
+
+            # If the task is already finished when the client connects (race condition),
+            # immediately re-send the complete/failed event with the full result so the
+            # frontend doesn't miss it.
+            if status.get("status") == "complete":
+                final_result = status.get("final_result") or {}
+                # For conversation tasks, synthesize result from direct_reply
+                if not final_result and status.get("direct_reply"):
+                    final_result = {
+                        "status": "complete",
+                        "intent_type": status.get("intent_type", "conversation"),
+                        "summary": status.get("direct_reply", ""),
+                        "highlights": [],
+                        "completed_agents": status.get("completed_agents", []),
+                        "agent_results": {},
+                        "error_log": [],
+                        "retry_counts": status.get("retry_counts", {}),
+                        "saga_log": status.get("saga_log", []),
+                        "task_id": task_id,
+                    }
+                await websocket.send_text(json.dumps(
+                    {"event": "complete", "result": final_result}, default=str
+                ))
+                await websocket.send_text(json.dumps(
+                    {"event": "terminal", "status": "complete"}
+                ))
+                return
+
+            elif status.get("status") == "failed":
+                await websocket.send_text(json.dumps({"event": "error", "message": "Task failed"}))
+                await websocket.send_text(json.dumps({"event": "terminal", "status": "failed"}))
+                return
 
         # Keep connection alive — poll for status updates every second
         while True:
@@ -182,7 +237,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
             status = orchestrator.get_live_status(task_id)
             if status:
                 await websocket.send_text(
-                    json.dumps({"event": "status", **status})
+                    json.dumps({"event": "status", **status}, default=str)
                 )
             # Stop polling on terminal states — prevents infinite reconnect loop
             if status and status.get("status") in ("complete", "failed"):
