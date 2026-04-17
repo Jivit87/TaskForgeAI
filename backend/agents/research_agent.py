@@ -19,15 +19,24 @@ log = logging.getLogger("frame_mo.research_agent")
 
 class ResearchAgent(BaseAgent):
     agent_name = "research_agent"
+    agent_description = "Web search and fact-finding via Tavily Search"
     mcp_server = "tavily-mcp"
     tool_names  = [
-        # MCP tools (resolved via mcp_server at dispatch time)
         "search",
         "fetch_url",
-        # Native tools
         "summarize_content",
         "calculate_confidence",
     ]
+    routing_parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Research query"},
+            "depth": {"type": "string", "enum": ["shallow", "deep"], "description": "Search depth"},
+            "description": {"type": "string", "description": "Task description"},
+        },
+        "required": ["query"],
+    }
+    compensating_actions = {}  # research is read-only, no rollback needed
 
     async def execute(
         self,

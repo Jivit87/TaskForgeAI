@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="FRAME-MO API",
     description="Fault-Resilient Agentic Multi-Orchestral Engine — Dashboard API",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -90,8 +90,6 @@ class HITLDecisionRequest(BaseModel):
 
 @app.post("/tasks", summary="Start a new agent task")
 async def start_task(req: StartTaskRequest):
-    # Generate the task_id upfront so the client can subscribe to the correct
-    # WebSocket channel BEFORE the orchestrator begins running.
     task_id = req.task_id or str(uuid.uuid4())[:8]
 
     inject = {}
@@ -161,7 +159,7 @@ async def mcp_health():
 
 @app.get("/health", summary="API health check")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "2.0.0"}
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -186,7 +184,11 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                 await websocket.send_text(
                     json.dumps({"event": "status", **status})
                 )
+            # Stop polling on terminal states — prevents infinite reconnect loop
             if status and status.get("status") in ("complete", "failed"):
+                await websocket.send_text(
+                    json.dumps({"event": "terminal", "status": status.get("status")})
+                )
                 break
 
     except WebSocketDisconnect:

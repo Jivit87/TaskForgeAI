@@ -6,16 +6,14 @@ Master Orchestrator generates this before routing to sub-agents.
 """
 
 from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from typing import Optional
 
 
 class SubTask(BaseModel):
     """A single unit of work routed to one sub-agent."""
 
     # Which agent handles this subtask
-    agent: Literal[
-        "research_agent", "code_agent", "knowledge_agent", "comms_agent"
-    ]
+    agent: str = Field(..., description="Agent name from the registry")
 
     # Human-readable description of what should be done
     description: str = Field(
@@ -45,6 +43,18 @@ class SubTask(BaseModel):
     # Priority order (lower = runs first)
     order: int = Field(default=0, ge=0)
 
+    # Saga recovery (v2)
+    compensating_action: str = Field(
+        default="",
+        description="Rollback instruction if this step needs to be undone"
+    )
+
+    # LTL verification flag (v2)
+    verified: bool = Field(
+        default=False,
+        description="Set to True by the LTL verifier after pre-flight check"
+    )
+
 
 class ExecutionPlan(BaseModel):
     """
@@ -65,6 +75,16 @@ class ExecutionPlan(BaseModel):
     notes: str = Field(
         default="",
         description="Orchestrator notes on the plan (e.g., risks, assumptions)"
+    )
+
+    # LTL verification (v2)
+    ltl_verified: bool = Field(
+        default=False,
+        description="True if the plan passed the LTL verification gate"
+    )
+    verification_notes: str = Field(
+        default="",
+        description="Notes from the LTL verifier about the plan"
     )
 
     @property

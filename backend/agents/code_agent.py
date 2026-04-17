@@ -22,17 +22,32 @@ WRITE_ACTIONS = {"create_issue", "post_comment", "merge_pr"}
 
 class CodeAgent(BaseAgent):
     agent_name = "code_agent"
+    agent_description = "GitHub interactions: read PRs/issues, create issues, post comments"
     mcp_server = "github-mcp"
     tool_names  = [
-        # MCP tools
         "get_pr_diff",
         "create_github_issue",
         "post_review_comment",
         "list_issues",
-        # Native
         "summarize_content",
         "calculate_confidence",
     ]
+    routing_parameters = {
+        "type": "object",
+        "properties": {
+            "repo":        {"type": "string", "description": "owner/repo"},
+            "action":      {"type": "string", "enum": ["read_pr", "create_issue", "post_comment", "list_issues"]},
+            "target_id":   {"type": "integer", "description": "PR or issue number"},
+            "title":       {"type": "string", "description": "Issue title"},
+            "body":        {"type": "string", "description": "Issue or comment body"},
+            "description": {"type": "string", "description": "Task description"},
+        },
+        "required": ["repo", "action"],
+    }
+    compensating_actions = {
+        "create_issue": "Close the GitHub issue that was created",
+        "post_comment": "Delete the GitHub comment that was posted",
+    }
 
     async def execute(
         self,

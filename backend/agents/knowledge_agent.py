@@ -22,17 +22,31 @@ WRITE_ACTIONS = {"create", "append", "delete"}
 
 class KnowledgeAgent(BaseAgent):
     agent_name = "knowledge_agent"
+    agent_description = "Notion workspace: read, create, and append pages"
     mcp_server = "notion-mcp"
     tool_names  = [
-        # MCP tools
         "read_notion_page",
         "create_notion_page",
         "append_notion_block",
         "search_notion",
-        # Native
         "summarize_content",
         "extract_structured_data",
     ]
+    routing_parameters = {
+        "type": "object",
+        "properties": {
+            "action":      {"type": "string", "enum": ["read", "create", "append"]},
+            "page_id":     {"type": "string", "description": "Notion page ID"},
+            "title":       {"type": "string", "description": "Page title"},
+            "content":     {"type": "string", "description": "Markdown content"},
+            "description": {"type": "string", "description": "Task description"},
+        },
+        "required": ["action"],
+    }
+    compensating_actions = {
+        "create": "Delete the Notion page that was created",
+        "append": "Remove the appended blocks from the Notion page",
+    }
 
     async def execute(
         self,

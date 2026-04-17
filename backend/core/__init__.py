@@ -1,20 +1,22 @@
 from __future__ import annotations
-"""core — Reliability infrastructure for FRAME-MO."""
+"""core — Backbone modules for the FRAME-MO orchestration pipeline."""
 
-from .state import AgentState
 from .checkpoint import CheckpointStore
+from .hitl import HITLGate
 from .retry import with_retry, with_retry_sync, AgentStepError
-from .hitl import HITLGate, HITLRequest, IRREVERSIBLE_ACTIONS
-from .orchestrator import MasterOrchestrator
+from .ltl_verifier import verify_plan, LTLVerificationResult
+from .pei_monitor import PEIMonitor, PEIContext
+from .saga import SagaEngine
 
 __all__ = [
-    "AgentState",
     "CheckpointStore",
+    "HITLGate",
     "with_retry",
     "with_retry_sync",
     "AgentStepError",
-    "HITLGate",
-    "HITLRequest",
-    "IRREVERSIBLE_ACTIONS",
-    "MasterOrchestrator",
+    "verify_plan",
+    "LTLVerificationResult",
+    "PEIMonitor",
+    "PEIContext",
+    "SagaEngine",
 ]

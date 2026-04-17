@@ -14,11 +14,12 @@ from typing import Literal
 class AgentState:
     # ── Identity ──────────────────────────────────────────────────────────────
     task_id: str
-    version: int = 2
+    version: int = 3
 
     # ── Task ──────────────────────────────────────────────────────────────────
     goal: str = ""
     execution_plan: list = field(default_factory=list)   # list[SubTask dicts]
+    intent_type: str = "task"   # "conversation" | "task"
 
     # ── Progress ──────────────────────────────────────────────────────────────
     current_agent: str = ""
@@ -30,9 +31,14 @@ class AgentState:
     retry_counts: dict = field(default_factory=dict)     # agent_name → int
     error_log: list = field(default_factory=list)
 
+    # ── Reliability (v2) ──────────────────────────────────────────────────────
+    saga_log: list = field(default_factory=list)          # compensating actions taken
+    pei_violations: list = field(default_factory=list)    # PEI monitor flags
+    direct_reply: str = ""                                # LLM reply for conversation mode
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     status: Literal[
-        "pending", "running", "paused_hitl", "complete", "failed"
+        "pending", "running", "paused_hitl", "rolling_back", "complete", "failed"
     ] = "pending"
     created_at: str = ""
     updated_at: str = ""
@@ -74,6 +80,23 @@ class AgentState:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
+    def log_saga_action(self, agent_name: str, action: str, success: bool) -> None:
+        """Record a compensating action during saga rollback."""
+        self.saga_log.append({
+            "agent": agent_name,
+            "action": action,
+            "success": success,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+    def log_pei_violation(self, agent_name: str, violation: str) -> None:
+        """Record a PEI monitor violation."""
+        self.pei_violations.append({
+            "agent": agent_name,
+            "violation": violation,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
     def is_agent_done(self, agent_name: str) -> bool:
         return agent_name in self.completed_agents
 
@@ -82,4 +105,7 @@ class AgentState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentState":
-        return cls(**data)
+        # Handle forward-compat: ignore unknown keys from older checkpoints
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)

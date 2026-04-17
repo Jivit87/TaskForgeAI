@@ -35,11 +35,16 @@ class BaseAgent(ABC):
 
     Subclasses must implement:
       - agent_name: str  (class attribute)
+      - agent_description: str  (one-liner for LLM routing)
+      - routing_parameters: dict  (JSON schema for the routing tool)
       - tool_names: list[str]  (Groq-callable tools for this agent)
       - execute(task: dict, state: AgentState, mcp_manager) -> dict
     """
 
     agent_name: str = "base_agent"
+    agent_description: str = ""      # one-liner shown to orchestrator LLM
+    routing_parameters: dict = {}    # JSON schema for the routing tool call
+    compensating_actions: dict = {}  # action → rollback instruction
     tool_names: list[str] = []       # registry keys of tools available to this agent
     mcp_server: str = ""             # which MCP server this agent uses
 
@@ -85,10 +90,29 @@ class BaseAgent(ABC):
         messages = [
             {"role": "user", "content": json.dumps(task, indent=2)}
         ]
+
+        # Build tool schemas: native registry tools + MCP tool stubs
         tools = get_groq_schemas(self.tool_names) if self.tool_names else []
+        known_tool_names = {t["function"]["name"] for t in tools}
+        for tn in self.tool_names:
+            if tn not in known_tool_names:
+                # MCP tool not in native registry — add a stub schema so Groq knows about it
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tn,
+                        "description": f"MCP tool: {tn}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "args": {"type": "object", "description": "Tool arguments"}
+                            },
+                        },
+                    },
+                })
 
         log.debug(f"[{self.agent_name}] → Groq  task_keys={list(task.keys())}  "
-                  f"tools={self.tool_names}")
+                  f"tools={[t['function']['name'] for t in tools]}")
 
         # First call
         response = self.groq.chat.completions.create(

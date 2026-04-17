@@ -19,12 +19,11 @@ class ResearchResult(BaseModel):
     query: str = Field(..., description="The research query that was executed")
     summary: str = Field(
         ...,
-        min_length=20,
+        min_length=1,
         description="Synthesized summary of findings"
     )
     sources: list[str] = Field(
-        ...,
-        min_length=1,
+        default_factory=list,
         description="List of source URLs used"
     )
     key_facts: list[str] = Field(

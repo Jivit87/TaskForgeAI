@@ -22,16 +22,31 @@ log = logging.getLogger("frame_mo.comms_agent")
 
 class CommsAgent(BaseAgent):
     agent_name = "comms_agent"
+    agent_description = "Gmail email operations: read threads, draft and send emails"
     mcp_server = "gmail-mcp"
     tool_names  = [
-        # MCP tools
         "read_email_thread",
         "draft_email",
         "send_email",
-        # Native
         "summarize_content",
         "calculate_confidence",
     ]
+    routing_parameters = {
+        "type": "object",
+        "properties": {
+            "action":      {"type": "string", "enum": ["read", "draft", "send"]},
+            "recipient":   {"type": "string", "description": "Email address"},
+            "subject":     {"type": "string", "description": "Email subject"},
+            "body":        {"type": "string", "description": "Email body"},
+            "thread_id":   {"type": "string", "description": "Thread ID to read"},
+            "description": {"type": "string", "description": "Task description"},
+        },
+        "required": ["action"],
+    }
+    compensating_actions = {
+        "send": "The email has been sent and cannot be recalled",
+        "draft": "Delete the draft email that was created",
+    }
 
     async def execute(
         self,
