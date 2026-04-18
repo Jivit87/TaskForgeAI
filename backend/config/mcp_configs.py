@@ -118,7 +118,7 @@ def tavily_mcp_config() -> dict:
     return {
         "type": "stdio",
         "command": "npx",
-        "args": ["-y", "@tavily/mcp-server"],
+        "args": ["-y", "tavily-mcp"],
         "env": {
             "TAVILY_API_KEY": os.environ.get("TAVILY_API_KEY", ""),
         },
