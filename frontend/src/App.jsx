@@ -62,7 +62,8 @@ const ChatBubble = ({ turn, onHITL }) => {
   const { metrics, result, status } = turn;
   const isConversation = turn.intent_type === 'conversation' || result?.intent_type === 'conversation';
   const hasAgentWork   = (metrics?.completed_agents?.length ?? 0) > 0 || metrics?.current_agent;
-  const replyText      = metrics?.direct_reply || result?.summary || '';
+  // Prefer streamingText (accumulated live tokens) over result.summary
+  const replyText      = turn.streamingText || metrics?.direct_reply || result?.summary || '';
   const isRunning      = status === 'running' || status === 'started';
   const isFailed       = status === 'failed';
 
@@ -161,8 +162,16 @@ const ChatBubble = ({ turn, onHITL }) => {
           </div>
         )}
 
-        {/* Loading pulse while running */}
-        {isRunning && !replyText && !hasAgentWork && (
+        {/* Streaming text — rendered token-by-token while aggregate is running */}
+        {isRunning && turn.streamingText && (
+          <div className="prose prose-slate prose-sm sm:prose-base max-w-none text-slate-800 leading-relaxed mt-1">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.streamingText}</ReactMarkdown>
+            <span className="inline-block w-[2px] h-[1em] bg-[#d97757] animate-pulse ml-0.5 align-middle" />
+          </div>
+        )}
+
+        {/* Loading pulse — shown only before any streaming text arrives */}
+        {isRunning && !turn.streamingText && !replyText && !hasAgentWork && (
           <div className="flex items-center gap-2 text-slate-500 text-sm">
             <Loader2 size={14} className="animate-spin" /> Thinking...
           </div>
@@ -175,7 +184,7 @@ const ChatBubble = ({ turn, onHITL }) => {
           </div>
         )}
 
-        {/* Final response text */}
+        {/* Final response text — shown when complete AND we have text */}
         {replyText && status === 'complete' && (
           <div className="prose prose-slate prose-sm sm:prose-base max-w-none text-slate-800 leading-relaxed mt-1">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyText}</ReactMarkdown>
@@ -281,6 +290,14 @@ const App = () => {
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
 
+      if (data.event === 'stream_token') {
+        setMessages(prev => prev.map(m =>
+          m.role === 'assistant' && m.task_id === taskId
+            ? { ...m, streamingText: (m.streamingText ?? '') + data.token }
+            : m
+        ));
+      }
+
       if (data.event === 'status') {
         // Update the live assistant bubble for this task.
         // IMPORTANT: Do NOT set status to 'complete' or 'failed' here —
@@ -321,10 +338,11 @@ const App = () => {
                 ...m,
                 status: 'complete',
                 result: data.result,
+                // Keep streamingText so it can be used as replyText
+                streamingText: m.streamingText || undefined,
                 intent_type: data.result.intent_type ?? m.intent_type,
                 metrics: {
                   ...m.metrics,
-                  // Merge key fields from result into metrics so replyText resolves
                   direct_reply:     data.result.summary || m.metrics?.direct_reply || '',
                   completed_agents: data.result.completed_agents ?? m.metrics?.completed_agents ?? [],
                   retry_counts:     data.result.retry_counts ?? m.metrics?.retry_counts ?? {},
@@ -334,7 +352,7 @@ const App = () => {
               }
             : m
         ));
-        setActiveTaskId(null);   // ← unblock input
+        setActiveTaskId(null);
         fetchSessions();
       }
 

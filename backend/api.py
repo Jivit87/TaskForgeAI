@@ -117,7 +117,11 @@ async def start_task(req: StartTaskRequest):
 
     async def _run_and_broadcast():
         try:
-            result = await orch.run(goal=req.goal, task_id=task_id)
+            async def _on_token(token: str):
+                """Broadcast each LLM token to connected WebSocket clients."""
+                await _broadcast(task_id, {"event": "stream_token", "token": token})
+
+            result = await orch.run(goal=req.goal, task_id=task_id, on_token=_on_token)
             # Cache the result BEFORE broadcasting so late WS clients always find it
             _task_results[task_id] = result
             await _broadcast(task_id, {"event": "complete", "result": result})

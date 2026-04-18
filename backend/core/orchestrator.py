@@ -22,6 +22,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from typing import Callable, Awaitable
 
 import openai
 
@@ -159,6 +160,7 @@ class MasterOrchestrator:
         self,
         goal: str,
         task_id: str | None = None,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict:
         """
         Execute a full pipeline for the given goal.
@@ -241,8 +243,8 @@ class MasterOrchestrator:
             # Step 3 — Execute each sub-agent
             state = await self._execute_plan(state)
 
-            # Step 4 — Aggregate
-            final = await self._aggregate(state)
+            # Step 4 — Aggregate (with optional token streaming)
+            final = await self._aggregate(state, on_token=on_token)
 
             # Save result into state so late WS connections can read it
             state.final_result = final
@@ -498,55 +500,127 @@ class MasterOrchestrator:
 
     # ── Step 3: Aggregate ─────────────────────────────────────────────────────
 
-    async def _aggregate(self, state: AgentState) -> dict:
+    async def _aggregate(
+        self,
+        state: AgentState,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> dict:
         """
         Call Ollama to synthesize all sub-agent results into a final summary.
+        When on_token is provided, streams a plain-text answer token-by-token
+        via an asyncio.Queue bridge, then builds the result dict ourselves.
         """
         log.info("[orchestrator] Aggregating results with Ollama...")
 
-        # Build a content-focused prompt that includes the actual data
         agent_data_str = json.dumps(state.agent_results, indent=2, default=str)
+        system_msg = get_prompt("orchestrator").replace("{{AGENT_TABLE}}", self._agent_table)
 
-        summary_prompt = (
-            f"You have completed a multi-agent task.\n\n"
-            f"Original goal: {state.goal}\n\n"
-            f"Agent results:\n{agent_data_str}\n\n"
-            f"Write a comprehensive summary based on the ACTUAL DATA returned by the agents. "
-            f"Include specific facts, numbers, headlines, and details from the results. "
-            f"Do NOT write a meta-description of what agents did — write the actual answer "
-            f"the user was looking for.\n\n"
-            f"Respond ONLY with valid JSON:\n"
-            f'{{"status":"complete","goal":"...","summary":"<detailed answer with actual data>","highlights":["<specific fact 1>","<specific fact 2>","..."]}}'
-        )
+        # ── Streaming path ────────────────────────────────────────────────────
+        if on_token is not None:
+            import asyncio
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": get_prompt("orchestrator").replace("{{AGENT_TABLE}}", self._agent_table)},
-                {"role": "user", "content": summary_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=2048,
-        )
+            # Plain-text prompt — no JSON wrapper so the user sees readable prose
+            stream_prompt = (
+                f"You have completed a multi-agent task.\n\n"
+                f"Original goal: {state.goal}\n\n"
+                f"Agent results:\n{agent_data_str}\n\n"
+                f"Write a comprehensive, well-structured answer based on the "
+                f"ACTUAL DATA returned by the agents. Include specific facts, "
+                f"numbers, file names, URLs, and details from the results.\n"
+                f"Write ONLY the answer in plain text / markdown — no JSON, "
+                f"no code fences, no meta-commentary about the agents."
+            )
 
-        raw_text = response.choices[0].message.content or "{}"
-        try:
-            if "```" in raw_text:
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-            final = json.loads(raw_text.strip())
-        except json.JSONDecodeError:
+            token_q: asyncio.Queue[str | None] = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+
+            def _stream_worker():
+                """Blocking thread: reads openai stream, pushes tokens to queue."""
+                try:
+                    stream = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": stream_prompt},
+                        ],
+                        temperature=0.1,
+                        max_tokens=2048,
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        tok = ""
+                        if chunk.choices:
+                            tok = chunk.choices[0].delta.content or ""
+                        if tok:
+                            loop.call_soon_threadsafe(token_q.put_nowait, tok)
+                except Exception as exc:
+                    log.error(f"[orchestrator] Stream error: {exc}")
+                finally:
+                    loop.call_soon_threadsafe(token_q.put_nowait, None)  # sentinel
+
+            # Start blocking stream in background thread
+            asyncio.get_event_loop().run_in_executor(None, _stream_worker)
+
+            # Consume tokens as they arrive (truly real-time)
+            raw_text = ""
+            while True:
+                token = await token_q.get()
+                if token is None:
+                    break
+                raw_text += token
+                await on_token(token)
+
+            log.info(f"[orchestrator] Streamed {len(raw_text)} chars to frontend")
+
+            # Build result dict directly (no JSON parsing needed)
             final = {
                 "status": "complete",
                 "goal": state.goal,
-                "summary": raw_text[:1000],
+                "summary": raw_text.strip(),
                 "highlights": [],
             }
 
+        else:
+            # ── Non-streaming path (JSON) ─────────────────────────────────────
+            summary_prompt = (
+                f"You have completed a multi-agent task.\n\n"
+                f"Original goal: {state.goal}\n\n"
+                f"Agent results:\n{agent_data_str}\n\n"
+                f"Write a comprehensive summary based on the ACTUAL DATA returned by the agents. "
+                f"Include specific facts, numbers, headlines, and details from the results. "
+                f"Do NOT write a meta-description of what agents did — write the actual answer "
+                f"the user was looking for.\n\n"
+                f"Respond ONLY with valid JSON:\n"
+                f'{{"status":"complete","goal":"...","summary":"<detailed answer with actual data>","highlights":["<specific fact 1>","<specific fact 2>","..."]}}'
+            )
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": summary_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            raw_text = response.choices[0].message.content or "{}"
+
+            try:
+                if "```" in raw_text:
+                    raw_text = raw_text.split("```")[1]
+                    if raw_text.startswith("json"):
+                        raw_text = raw_text[4:]
+                final = json.loads(raw_text.strip())
+            except json.JSONDecodeError:
+                final = {
+                    "status": "complete",
+                    "goal": state.goal,
+                    "summary": raw_text[:1000],
+                    "highlights": [],
+                }
+
         # Ensure summary is not empty — fall back to agent results directly
         if not final.get("summary") or len(final["summary"]) < 20:
-            # Pull summary from agent results if the LLM failed
             for agent_name, result in state.agent_results.items():
                 if isinstance(result, dict) and result.get("summary"):
                     final["summary"] = result["summary"]
