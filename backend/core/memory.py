@@ -303,7 +303,7 @@ class ConversationMemory:
 
     # ── Summarization ─────────────────────────────────────────────────────────
 
-    def maybe_summarize(self, llm_client, model: str) -> bool:
+    async def maybe_summarize(self, llm_client, model: str) -> bool:
         """
         If there are more turns than WINDOW_SIZE, summarize the oldest
         turns that fall outside the window and store the summary.
@@ -355,7 +355,7 @@ class ConversationMemory:
         )
 
         try:
-            response = llm_client.chat.completions.create(
+            response = await llm_client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a conversation summarizer. Be concise and factual."},

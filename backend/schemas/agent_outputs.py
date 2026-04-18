@@ -60,7 +60,7 @@ class CodeResult(BaseModel):
 class KnowledgeResult(BaseModel):
     """Output schema for the Knowledge Sub-Agent (Notion read/write)."""
 
-    action: Literal["read", "create", "append", "search_databases", "search_notion"] = Field(
+    action: Literal["read", "create", "append", "search_databases", "search_notion", "search"] = Field(
         ..., description="Notion operation performed"
     )
     page_id: str = Field(default="", description="Notion page ID acted upon")

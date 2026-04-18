@@ -53,6 +53,7 @@ class KnowledgeAgent(BaseAgent):
         task: dict,
         state: AgentState,
         mcp_manager=None,
+        pei_context=None,
     ) -> dict:
         """
         Execute a Notion operation.
@@ -94,7 +95,7 @@ class KnowledgeAgent(BaseAgent):
             ),
         }
 
-        result = await self.run(enriched_task, state)
+        result = await self.run(enriched_task, state, pei_context=pei_context)
 
         log.info(
             f"[knowledge_agent] ✅ {action} → "

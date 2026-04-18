@@ -29,17 +29,47 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("frame_mo.saga")
 
+# ── Compensating action → MCP tool mapping ────────────────────────────────────
+# Maps agent names to their MCP server and rollback tool configurations.
+COMPENSATING_MCP_MAP = {
+    "code_agent": {
+        "mcp_server": "github-mcp",
+        "actions": {
+            "close_issue": lambda result: {
+                "tool": "update_issue",
+                "args": {
+                    "owner": result.get("repo", "").split("/")[0] if "/" in result.get("repo", "") else "",
+                    "repo": result.get("repo", "").split("/")[1] if "/" in result.get("repo", "") else "",
+                    "issue_number": result.get("issue_number"),
+                    "state": "closed",
+                },
+            },
+        },
+    },
+    "knowledge_agent": {
+        "mcp_server": "notion-mcp",
+        "actions": {
+            "delete_page": lambda result: {
+                "tool": "API-delete-a-block",
+                "args": {"block_id": result.get("page_id", "")},
+            },
+        },
+    },
+}
+
 
 class SagaEngine:
     """
     Executes compensating actions in reverse order when a pipeline step fails.
 
     The engine reads compensating_actions from the agent's class metadata
-    and logs every action to the AgentState's saga_log.
+    and dispatches real MCP tool calls to undo the action. Falls back to
+    logging when MCP is unavailable.
     """
 
-    def __init__(self, checkpoint_store: "CheckpointStore"):
+    def __init__(self, checkpoint_store: "CheckpointStore", mcp_manager=None):
         self.checkpoint = checkpoint_store
+        self.mcp = mcp_manager
 
     async def rollback(
         self,
@@ -95,10 +125,6 @@ class SagaEngine:
             )
 
             try:
-                # Execute compensating action
-                # In a production system, this would call the MCP server
-                # to actually undo the action (close issue, delete page, etc.)
-                # For now, we log it as executed since MCP tools are stubbed.
                 await self._execute_compensating_action(
                     state=state,
                     step=step,
@@ -142,23 +168,47 @@ class SagaEngine:
         compensating: str,
     ) -> None:
         """
-        Execute a single compensating action.
-
-        In production, this would dispatch to the appropriate MCP server.
-        For the stub/demo environment, we log and return success.
+        Execute a single compensating action via MCP if available.
+        Falls back to log-only mode when MCP is not connected.
         """
         agent_result = state.agent_results.get(step.agent, {})
 
-        log.info(
-            f"[saga] Dispatching compensation for {step.agent}: "
-            f"{compensating} (result keys: {list(agent_result.keys())})"
-        )
-
-        # The compensating action is logged; in production with real MCP
-        # connections, we would call:
-        #   await mcp.call_tool(server, "close_issue", {issue_number: ...})
-        #   await mcp.call_tool(server, "delete_page", {page_id: ...})
-        # For now, the stub environment doesn't need actual rollback calls.
+        # Try to dispatch a real MCP compensating call
+        if self.mcp and step.agent in COMPENSATING_MCP_MAP:
+            agent_config = COMPENSATING_MCP_MAP[step.agent]
+            mcp_server = agent_config["mcp_server"]
+            # Find matching compensating action builder
+            for action_key, builder_fn in agent_config["actions"].items():
+                if action_key in compensating.lower().replace(" ", "_"):
+                    try:
+                        call_spec = builder_fn(agent_result)
+                        tool_name = call_spec["tool"]
+                        tool_args = call_spec["args"]
+                        # Only call if we have the required data
+                        if all(v for v in tool_args.values()):
+                            log.info(
+                                f"[saga] MCP rollback → {mcp_server}.{tool_name}"
+                                f"({list(tool_args.keys())})"
+                            )
+                            await self.mcp.call_tool(
+                                mcp_server, tool_name, tool_args, idempotent=False
+                            )
+                        else:
+                            log.warning(
+                                f"[saga] Missing data for MCP rollback of {step.agent} "
+                                f"— logging only"
+                            )
+                    except Exception as exc:
+                        log.warning(
+                            f"[saga] MCP compensating call failed for {step.agent}: {exc}. "
+                            f"Logging action as best-effort."
+                        )
+                    break
+        else:
+            log.info(
+                f"[saga] No MCP available for {step.agent} — "
+                f"logging compensating action: {compensating}"
+            )
 
         # Remove the agent from completed list since it's been rolled back
         if step.agent in state.completed_agents:

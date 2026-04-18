@@ -53,6 +53,7 @@ class CommsAgent(BaseAgent):
         task: dict,
         state: AgentState,
         mcp_manager=None,
+        pei_context=None,
     ) -> dict:
         """
         Execute a Gmail action.
@@ -96,7 +97,7 @@ class CommsAgent(BaseAgent):
             ),
         }
 
-        result = await self.run(enriched_task, state)
+        result = await self.run(enriched_task, state, pei_context=pei_context)
 
         # Log send events clearly for audit trail
         if action == "send" and result.get("status") == "sent":

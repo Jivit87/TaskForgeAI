@@ -50,6 +50,7 @@ class CodeAgent(BaseAgent):
         task: dict,
         state: AgentState,
         mcp_manager=None,
+        pei_context=None,
     ) -> dict:
         """
         Execute a GitHub action.
@@ -83,7 +84,7 @@ class CodeAgent(BaseAgent):
             ),
         }
 
-        result = await self.run(enriched_task, state)
+        result = await self.run(enriched_task, state, pei_context=pei_context)
 
         if result.get("status") != "success":
             log.warning(

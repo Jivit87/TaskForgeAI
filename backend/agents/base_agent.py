@@ -50,7 +50,7 @@ class BaseAgent(ABC):
 
     def __init__(self, mcp_manager=None):
         base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        self.llm = openai.OpenAI(base_url=base_url, api_key="ollama")
+        self.llm = openai.AsyncOpenAI(base_url=base_url, api_key="ollama")
         self.model = os.environ.get("OLLAMA_AGENT_MODEL", os.environ.get("OLLAMA_ORCHESTRATOR_MODEL", "llama3.3"))
         self.mcp = mcp_manager
         self.system_prompt = get_prompt(self.agent_name)
@@ -63,6 +63,7 @@ class BaseAgent(ABC):
         self,
         task: dict,
         state: AgentState,
+        pei_context=None,
     ) -> dict:
         """
         Top-level entry: run the agent with retry + validation.
@@ -70,6 +71,7 @@ class BaseAgent(ABC):
         Raises AgentStepError after max retries.
         """
         state.mark_agent_started(self.agent_name)
+        self._pei_context = pei_context  # Store for use in _call_groq
 
         @with_retry(max_attempts=3, base_delay=1.0)
         async def _attempt():
@@ -126,7 +128,7 @@ class BaseAgent(ABC):
                   f"tools={[t['function']['name'] for t in tools]}")
 
         # First call
-        response = self.llm.chat.completions.create(
+        response = await self.llm.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": self.system_prompt},
@@ -151,11 +153,20 @@ class BaseAgent(ABC):
             idempotency_hit = False
 
             for tc in message.tool_calls:
-                result = await self._dispatch_tool(
-                    tc.function.name,
-                    json.loads(tc.function.arguments),
-                    state,
-                )
+                tool_name = tc.function.name
+                tool_args = json.loads(tc.function.arguments)
+
+                # ── PEI Monitor: record + kill check ──
+                if self._pei_context is not None:
+                    from core.pei_monitor import PEIMonitor
+                    _pei = PEIMonitor()
+                    _pei.record_tool_call(self._pei_context, tool_name, tool_args)
+                    if _pei.should_kill(self._pei_context):
+                        violation = self._pei_context.violations[-1] if self._pei_context.violations else "PEI kill"
+                        log.warning(f"[{self.agent_name}] PEI killed agent: {violation}")
+                        raise RuntimeError(f"PEI monitor killed {self.agent_name}: {violation}")
+
+                result = await self._dispatch_tool(tool_name, tool_args, state)
                 # Detect idempotency / stub hits — no point calling LLM again
                 if isinstance(result, dict) and result.get("idempotency_hit"):
                     idempotency_hit = True
@@ -167,8 +178,8 @@ class BaseAgent(ABC):
                 })
                 state.log_tool_call(
                     self.agent_name,
-                    tc.function.name,
-                    json.loads(tc.function.arguments),
+                    tool_name,
+                    tool_args,
                 )
 
             messages.append({"role": "assistant", "content": message.content,
@@ -182,7 +193,7 @@ class BaseAgent(ABC):
             if idempotency_hit:
                 log.info(f"[{self.agent_name}] Idempotency hit — forcing final output")
                 try:
-                    final_call = self.llm.chat.completions.create(
+                    final_call = await self.llm.chat.completions.create(
                         model=self.model,
                         messages=[
                             {"role": "system", "content": self.system_prompt},
@@ -204,7 +215,7 @@ class BaseAgent(ABC):
                 break
 
             # Continuation call
-            follow_up = self.llm.chat.completions.create(
+            follow_up = await self.llm.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
@@ -373,6 +384,6 @@ class BaseAgent(ABC):
 
     # ── Abstract (optional override) ──────────────────────────────────────────
 
-    async def execute(self, task: dict, state: AgentState, mcp_manager=None) -> dict:
+    async def execute(self, task: dict, state: AgentState, mcp_manager=None, pei_context=None) -> dict:
         """Override in subclasses for custom pre/post processing."""
-        return await self.run(task, state)
+        return await self.run(task, state, pei_context=pei_context)

@@ -43,6 +43,7 @@ class ResearchAgent(BaseAgent):
         task: dict,
         state: AgentState,
         mcp_manager=None,
+        pei_context=None,
     ) -> dict:
         """
         Run web research for the given query.
@@ -125,7 +126,7 @@ class ResearchAgent(BaseAgent):
             )
 
             try:
-                response = self.llm.chat.completions.create(
+                response = await self.llm.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": synthesis_prompt}],
                     temperature=0.1,

@@ -126,7 +126,7 @@ class MasterOrchestrator:
         memory: ConversationMemory | None = None,
     ):
         base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        self.client = openai.OpenAI(
+        self.client = openai.AsyncOpenAI(
             base_url=base_url,
             api_key="ollama"
         )
@@ -139,7 +139,7 @@ class MasterOrchestrator:
         )
         self.hitl = HITLGate(self.checkpoint)
         self.pei = PEIMonitor()
-        self.saga = SagaEngine(self.checkpoint)
+        self.saga = SagaEngine(self.checkpoint, mcp_manager=self.mcp)
         self.inject_failures = inject_failures or {}
         self._agents: dict = {}
 
@@ -214,13 +214,18 @@ class MasterOrchestrator:
                     task_id=task_id,
                 )
                 # Auto-summarize if window overflowed
-                self.memory.maybe_summarize(self.client, self.model)
+                import asyncio
+                asyncio.create_task(self.memory.maybe_summarize(self.client, self.model))
 
                 log.info(f"[orchestrator] ✅ Conversation reply  task_id={task_id}")
                 return conv_result
 
-            # Step 2 — LTL Verification
-            if state.execution_plan:
+            # Step 2 — LTL Verification (with replan loop)
+            max_replan_attempts = 2
+            for replan_attempt in range(max_replan_attempts + 1):
+                if not state.execution_plan:
+                    break
+
                 plan = ExecutionPlan(
                     goal=goal,
                     steps=[SubTask(**s) for s in state.execution_plan],
@@ -230,15 +235,40 @@ class MasterOrchestrator:
                 plan.verification_notes = "; ".join(
                     ltl_result.violations + ltl_result.warnings
                 )
-                # Update state with verified plan
-                state.execution_plan = [s.model_dump() for s in plan.steps]
-                self.checkpoint.save(state)
 
-                if not ltl_result.valid:
+                if ltl_result.valid:
+                    # Plan passed — update and proceed
+                    state.execution_plan = [s.model_dump() for s in plan.steps]
+                    self.checkpoint.save(state)
+                    break
+
+                if replan_attempt < max_replan_attempts:
+                    # Replan: inject violations into context so LLM fixes them
+                    violations_str = "; ".join(ltl_result.violations)
                     log.warning(
-                        f"[orchestrator] LTL verification failed: "
-                        f"{ltl_result.violations}. Proceeding with caution."
+                        f"[orchestrator] LTL verification failed (attempt "
+                        f"{replan_attempt + 1}/{max_replan_attempts}): "
+                        f"{ltl_result.violations}. Replanning..."
                     )
+                    replan_goal = (
+                        f"{goal}\n\n"
+                        f"[REPLAN REQUIRED] Your previous plan had these safety violations: "
+                        f"{violations_str}. "
+                        f"Fix the plan to avoid these issues."
+                    )
+                    state.execution_plan = []
+                    state.direct_reply = None
+                    state = await self._plan(replan_goal, state)
+                    self.checkpoint.save(state)
+                else:
+                    # Exhausted replan attempts — proceed with warning
+                    log.warning(
+                        f"[orchestrator] LTL verification still failing after "
+                        f"{max_replan_attempts} replans: {ltl_result.violations}. "
+                        f"Proceeding with caution."
+                    )
+                    state.execution_plan = [s.model_dump() for s in plan.steps]
+                    self.checkpoint.save(state)
 
             # Step 3 — Execute each sub-agent
             state = await self._execute_plan(state)
@@ -266,7 +296,8 @@ class MasterOrchestrator:
                 status="complete",
             )
             # Auto-summarize if window overflowed
-            self.memory.maybe_summarize(self.client, self.model)
+            import asyncio
+            asyncio.create_task(self.memory.maybe_summarize(self.client, self.model))
 
             log.info(f"[orchestrator] ✅ Task complete  task_id={task_id}")
             return final
@@ -338,7 +369,7 @@ class MasterOrchestrator:
             f"({self.memory.get_total_turns()} prior turns stored)"
         )
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=self._routing_tools,
@@ -460,7 +491,7 @@ class MasterOrchestrator:
 
             # Dispatch to sub-agent
             try:
-                result = await self._dispatch_agent(agent_name, step.input, state)
+                result = await self._dispatch_agent(agent_name, step.input, state, pei_ctx=pei_ctx)
             except Exception as exc:
                 # Check PEI violations before propagating
                 if pei_ctx.violations:
@@ -487,7 +518,7 @@ class MasterOrchestrator:
                 state.increment_retry(agent_name)
                 state.log_error(agent_name, f"Validation error: {exc}")
                 # Retry once
-                result = await self._dispatch_agent(agent_name, step.input, state)
+                result = await self._dispatch_agent(agent_name, step.input, state, pei_ctx=pei_ctx)
                 validated = validate_agent_output(agent_name, result)
                 result = validated.model_dump()
 
@@ -531,44 +562,28 @@ class MasterOrchestrator:
                 f"no code fences, no meta-commentary about the agents."
             )
 
-            token_q: asyncio.Queue[str | None] = asyncio.Queue()
-            loop = asyncio.get_event_loop()
-
-            def _stream_worker():
-                """Blocking thread: reads openai stream, pushes tokens to queue."""
-                try:
-                    stream = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_msg},
-                            {"role": "user", "content": stream_prompt},
-                        ],
-                        temperature=0.1,
-                        max_tokens=2048,
-                        stream=True,
-                    )
-                    for chunk in stream:
-                        tok = ""
-                        if chunk.choices:
-                            tok = chunk.choices[0].delta.content or ""
-                        if tok:
-                            loop.call_soon_threadsafe(token_q.put_nowait, tok)
-                except Exception as exc:
-                    log.error(f"[orchestrator] Stream error: {exc}")
-                finally:
-                    loop.call_soon_threadsafe(token_q.put_nowait, None)  # sentinel
-
-            # Start blocking stream in background thread
-            asyncio.get_event_loop().run_in_executor(None, _stream_worker)
-
-            # Consume tokens as they arrive (truly real-time)
+            # Start async stream and process directly
             raw_text = ""
-            while True:
-                token = await token_q.get()
-                if token is None:
-                    break
-                raw_text += token
-                await on_token(token)
+            try:
+                stream = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": stream_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    tok = ""
+                    if chunk.choices:
+                        tok = chunk.choices[0].delta.content or ""
+                    if tok:
+                        raw_text += tok
+                        await on_token(tok)
+            except Exception as exc:
+                log.error(f"[orchestrator] Stream error: {exc}")
 
             log.info(f"[orchestrator] Streamed {len(raw_text)} chars to frontend")
 
@@ -594,7 +609,7 @@ class MasterOrchestrator:
                 f'{{"status":"complete","goal":"...","summary":"<detailed answer with actual data>","highlights":["<specific fact 1>","<specific fact 2>","..."]}}'
             )
 
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_msg},
@@ -653,6 +668,7 @@ class MasterOrchestrator:
         agent_name: str,
         task_input: dict,
         state: AgentState,
+        pei_ctx=None,
     ) -> dict:
         """Lazily instantiate and run the sub-agent for the given name."""
         if agent_name not in self._agents:
@@ -663,7 +679,7 @@ class MasterOrchestrator:
 
         agent = self._agents[agent_name]
         log.info(f"[orchestrator] → Dispatching {agent_name}")
-        return await agent.execute(task_input, state, mcp_manager=self.mcp)
+        return await agent.execute(task_input, state, mcp_manager=self.mcp, pei_context=pei_ctx)
 
     # ── HITL helpers ──────────────────────────────────────────────────────────
 
