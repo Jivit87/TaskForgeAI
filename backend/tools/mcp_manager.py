@@ -175,6 +175,11 @@ class MCPConnectionManager:
         If the server is unhealthy, attempts reconnect first.
         If idempotent=True, caches the result and skips duplicate calls.
         """
+        # ── Unwrap nested "args" key that LLMs frequently hallucinate ──
+        if "args" in args and isinstance(args["args"], dict):
+            inner = args.pop("args")
+            args.update(inner)
+
         # Health check + reconnect
         if self.health_status.get(server) not in ("healthy", "stub"):
             await self.reconnect(server)
@@ -212,8 +217,34 @@ class MCPConnectionManager:
 
         return result
 
-    # ── Health ────────────────────────────────────────────────────────────────
+    async def get_tools(self, server: str) -> list[dict]:
+        """
+        Dynamically fetch JSON schemas for all tools hosted by this MCP server.
+        Converts MCP SDK schemas into OpenAI/Groq compatible schemas.
+        """
+        conn = self.connections.get(server)
+        if not conn or isinstance(conn, _StubMCPConnection):
+            return []
 
+        tools_list = []
+        try:
+            if hasattr(conn, "list_tools"):
+                res = await conn.list_tools()
+                for t in res.tools:
+                    tools_list.append({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": getattr(t, "description", f"MCP Tool: {t.name}"),
+                            "parameters": getattr(t, "inputSchema", {"type": "object", "properties": {}}),
+                        }
+                    })
+        except Exception as exc:
+            log.error(f"[mcp] Error fetching tools for {server}: {exc}")
+
+        return tools_list
+
+    # ── Health ────────────────────────────────────────────────────────────────
     def get_health(self) -> dict[str, str]:
         return dict(self.health_status)
 

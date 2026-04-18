@@ -5,7 +5,7 @@ Code Sub-Agent — GitHub interactions.
 
 Model : llama-3.3-70b-versatile (Groq API)
 MCP   : GitHub MCP (github-mcp)
-Tools : get_pr_diff, create_github_issue, post_review_comment, list_issues
+Tools : Dynamic (All GitHub MCP supported functions)
 Output: CodeResult
 """
 
@@ -22,13 +22,9 @@ WRITE_ACTIONS = {"create_issue", "post_comment", "merge_pr"}
 
 class CodeAgent(BaseAgent):
     agent_name = "code_agent"
-    agent_description = "GitHub interactions: read PRs/issues, create issues, post comments"
+    agent_description = "GitHub interactions: full repository access including read/write files, branches, PRs, issues, and search"
     mcp_server = "github-mcp"
     tool_names  = [
-        "get_pr_diff",
-        "create_github_issue",
-        "post_review_comment",
-        "list_issues",
         "summarize_content",
         "calculate_confidence",
     ]
@@ -36,11 +32,11 @@ class CodeAgent(BaseAgent):
         "type": "object",
         "properties": {
             "repo":        {"type": "string", "description": "owner/repo"},
-            "action":      {"type": "string", "enum": ["read_pr", "create_issue", "post_comment", "list_issues"]},
-            "target_id":   {"type": "integer", "description": "PR or issue number"},
-            "title":       {"type": "string", "description": "Issue title"},
-            "body":        {"type": "string", "description": "Issue or comment body"},
-            "description": {"type": "string", "description": "Task description"},
+            "action":      {"type": "string", "description": "High-level goal (e.g., 'read_file', 'create_branch', 'create_pr', 'fix_bug')"},
+            "target_id":   {"type": "integer", "description": "PR or issue number if applicable"},
+            "title":       {"type": "string", "description": "Title if creating PR or Issue"},
+            "body":        {"type": "string", "description": "Body content for issue/PR/comment"},
+            "description": {"type": "string", "description": "Detailed task description"},
         },
         "required": ["repo", "action"],
     }
@@ -60,10 +56,10 @@ class CodeAgent(BaseAgent):
 
         task dict expected keys:
           - repo   (str): "owner/repo"
-          - action (str): "read_pr" | "create_issue" | "post_comment"
+          - action (str): High-level goal intended for the GitHub repo
           - target_id (int): PR or issue number (optional)
-          - title  (str): Issue title (for create_issue)
-          - body   (str): Issue/comment body
+          - title  (str): Issue/PR title (optional)
+          - body   (str): Issue/comment body (optional)
         """
         if mcp_manager:
             self.mcp = mcp_manager

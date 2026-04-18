@@ -93,12 +93,21 @@ class BaseAgent(ABC):
             {"role": "user", "content": json.dumps(task, indent=2)}
         ]
 
-        # Build tool schemas: native registry tools + MCP tool stubs
+        # Build tool schemas: native registry tools + MCP tools
         tools = get_groq_schemas(self.tool_names) if self.tool_names else []
-        known_tool_names = {t["function"]["name"] for t in tools}
+        known_tool_names = set(t["function"]["name"] for t in tools)
+
+        # Fetch dynamic tools from MCP server if available
+        if self.mcp and self.mcp_server:
+            mcp_tools = await self.mcp.get_tools(self.mcp_server)
+            for t in mcp_tools:
+                if t["function"]["name"] not in known_tool_names:
+                    tools.append(t)
+                    known_tool_names.add(t["function"]["name"])
+
+        # Fallback for STUB mode where mcp_tools is empty
         for tn in self.tool_names:
             if tn not in known_tool_names:
-                # MCP tool not in native registry — add a stub schema so the model knows about it
                 tools.append({
                     "type": "function",
                     "function": {
@@ -228,6 +237,20 @@ class BaseAgent(ABC):
                     return fallback
             return parsed
         except json.JSONDecodeError as exc:
+            # Attempt to extract JSON dynamically if conversational wrapper is present
+            import re
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+            fallback = self._synthesize_from_tool_results(all_tool_results)
+            if fallback:
+                log.info(f"[{self.agent_name}] Extracting JSON failed but synthesized fallback successfully salvaged logic.")
+                return fallback
+
             log.warning(f"[{self.agent_name}] JSON parse failed: {exc}. Raw: {content[:200]}")
             raise ValueError(f"Agent returned non-JSON output: {content[:200]}")
 
@@ -274,20 +297,38 @@ class BaseAgent(ABC):
         for tr in tool_results:
             try:
                 data = json.loads(tr.get("content", "{}"))
-                # Search results
-                if "results" in data:
+                
+                # Search results (Tavily HTTP stub style)
+                if isinstance(data, dict) and "results" in data:
                     for r in data["results"]:
-                        if r.get("snippet"):
-                            snippets.append(r["snippet"][:200])
-                        if r.get("url"):
-                            sources.append(r["url"])
-                # Fetch URL content
-                if "content" in data and isinstance(data["content"], str):
-                    snippets.append(data["content"][:300])
+                        if isinstance(r, dict):
+                            if r.get("snippet"):
+                                snippets.append(r["snippet"][:500])
+                            if r.get("url"):
+                                sources.append(r["url"])
+                
+                # Fetch URL content or standard string fallback
+                if isinstance(data, dict):
+                    if "error" in data:
+                        snippets.append(f"API Error: {str(data['error'])[:800]}")
+                    if "content" in data:
+                        c = data["content"]
+                        if isinstance(c, str):
+                            snippets.append(c[:4000])
+                        elif isinstance(c, list):
+                            # MCP standard array structure
+                            for item in c:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    snippets.append(item.get("text", "")[:4000])
+                # Pure array response fallback
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            snippets.append(item.get("text", "")[:4000])
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        summary = " ".join(snippets[:5]) if snippets else "Information retrieved from tool results."
+        summary = "\n\n".join(snippets[:5]) if snippets else "Information retrieved from tool results."
 
         if self.agent_name == "research_agent":
             return {
