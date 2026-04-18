@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Plus, Search, User, Paperclip, ArrowUp, PanelLeftClose, PanelLeft,
   Database, Blocks, Settings, Code, Mail, FileText, CheckCircle2,
@@ -176,11 +178,32 @@ const ChatBubble = ({ turn, onHITL }) => {
         {/* Final response text */}
         {replyText && status === 'complete' && (
           <div className="prose prose-slate prose-sm sm:prose-base max-w-none text-slate-800 leading-relaxed mt-1">
-            <p className="whitespace-pre-wrap">{replyText}</p>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyText}</ReactMarkdown>
             {result?.highlights?.length > 0 && (
               <ul className="mt-2 space-y-1 pl-4">
                 {result.highlights.map((h, idx) => <li key={idx}>{h}</li>)}
               </ul>
+            )}
+            {result?.key_facts?.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Key Facts</p>
+                <ul className="space-y-1 pl-4">
+                  {result.key_facts.map((f, idx) => <li key={idx} className="text-sm text-slate-700">{f}</li>)}
+                </ul>
+              </div>
+            )}
+            {result?.sources?.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Sources</p>
+                <div className="flex flex-wrap gap-2">
+                  {result.sources.map((s, idx) => (
+                    <a key={idx} href={s} target="_blank" rel="noopener noreferrer"
+                       className="text-xs text-blue-600 hover:text-blue-800 bg-blue-50 px-2 py-1 rounded-md hover:bg-blue-100 transition-colors truncate max-w-[250px]">
+                      {new URL(s).hostname.replace('www.', '')}
+                    </a>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         )}
@@ -259,12 +282,19 @@ const App = () => {
       const data = JSON.parse(event.data);
 
       if (data.event === 'status') {
-        // Update the live assistant bubble for this task
+        // Update the live assistant bubble for this task.
+        // IMPORTANT: Do NOT set status to 'complete' or 'failed' here —
+        // those transitions must come from the 'complete'/'error' events
+        // which carry the actual result payload.
+        const statusVal = (data.status === 'complete' || data.status === 'failed')
+          ? undefined   // ignore terminal status from poll — wait for event
+          : data.status;
+
         setMessages(prev => prev.map(m =>
           m.role === 'assistant' && m.task_id === taskId
             ? {
                 ...m,
-                status: data.status ?? m.status,
+                status: statusVal ?? m.status,
                 metrics: {
                   completed_agents: data.completed_agents ?? m.metrics?.completed_agents ?? [],
                   current_agent:    data.current_agent    ?? null,
@@ -284,9 +314,24 @@ const App = () => {
       }
 
       if (data.event === 'complete' && data.result) {
+        // THIS is the authoritative "done" signal — set status + result together
         setMessages(prev => prev.map(m =>
           m.role === 'assistant' && m.task_id === taskId
-            ? { ...m, status: 'complete', result: data.result, intent_type: data.result.intent_type }
+            ? {
+                ...m,
+                status: 'complete',
+                result: data.result,
+                intent_type: data.result.intent_type ?? m.intent_type,
+                metrics: {
+                  ...m.metrics,
+                  // Merge key fields from result into metrics so replyText resolves
+                  direct_reply:     data.result.summary || m.metrics?.direct_reply || '',
+                  completed_agents: data.result.completed_agents ?? m.metrics?.completed_agents ?? [],
+                  retry_counts:     data.result.retry_counts ?? m.metrics?.retry_counts ?? {},
+                  saga_log:         data.result.saga_log ?? m.metrics?.saga_log ?? [],
+                  intent_type:      data.result.intent_type ?? m.metrics?.intent_type ?? 'task',
+                },
+              }
             : m
         ));
         setActiveTaskId(null);   // ← unblock input
@@ -305,7 +350,8 @@ const App = () => {
 
       if (data.event === 'terminal') {
         wsReconnects.current = 99; // prevent further reconnects
-        setActiveTaskId(null);
+        // DON'T setActiveTaskId(null) here — let complete/error handle it
+        // This just stops reconnection attempts
       }
     };
 

@@ -16,6 +16,8 @@ import logging
 import os
 from typing import Any
 
+import httpx
+
 log = logging.getLogger("frame_mo.mcp_manager")
 
 
@@ -73,23 +75,19 @@ class MCPConnectionManager:
     Manages the lifecycle of MCP server connections.
 
     Provides:
-      - async connect() with error tracking
-      - async call_tool() with idempotency key dedup
-      - health_status dict for dashboard polling
-      - reconnect() on detected failure
+      - connect_all() / connect(name) / reconnect(name)
+      - call_tool(server, tool, args)
+      - get_health() / is_healthy(server)
+      - Idempotency caching for write operations
     """
 
     def __init__(self):
-        self.configs: dict[str, dict] = _load_mcp_configs()
+        from contextlib import AsyncExitStack
+        self.configs = _load_mcp_configs()
         self.connections: dict[str, Any] = {}
-        self.health_status: dict[str, str] = {
-            name: "disconnected" for name in self.configs
-        }
-        # Idempotency — key → cached result
-        self._call_log: set[str] = set()
-        self._call_cache: dict[str, Any] = {}
-
-    # ── Connection lifecycle ──────────────────────────────────────────────────
+        self.exit_stacks: dict[str, AsyncExitStack] = {}
+        self.health_status: dict[str, str] = {}
+        self._idempotency_cache: dict[str, dict] = {}
 
     async def connect_all(self) -> None:
         """Connect to all configured MCP servers."""
@@ -106,8 +104,36 @@ class MCPConnectionManager:
         try:
             # Real MCP connection (requires `mcp` package installed)
             import mcp
-            conn = await mcp.connect(config)
-            self.connections[name] = conn
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            try:
+                from mcp.client.sse import sse_client
+            except ImportError:
+                sse_client = None
+
+            from contextlib import AsyncExitStack
+            stack = AsyncExitStack()
+
+            if config["type"] == "stdio":
+                server_params = StdioServerParameters(
+                    command=config["command"],
+                    args=config["args"],
+                    env={**os.environ, **config.get("env", {})}
+                )
+                transport = await stack.enter_async_context(stdio_client(server_params))
+            elif config["type"] == "url":
+                if sse_client is None:
+                    raise Exception("sse_client not available in this mcp version")
+                transport = await stack.enter_async_context(sse_client(config["url"], headers=config.get("headers")))
+            else:
+                raise ValueError(f"Unknown mcp type {config['type']}")
+
+            read_stream, write_stream = transport
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+
+            self.exit_stacks[name] = stack
+            self.connections[name] = session
             self.health_status[name] = "healthy"
             log.info(f"[mcp] Connected → {name}")
 
@@ -118,8 +144,15 @@ class MCPConnectionManager:
             self.health_status[name] = "stub"
 
         except Exception as exc:
-            self.health_status[name] = "failed"
+            if 'stack' in locals():
+                try:
+                    await stack.aclose()
+                except Exception:
+                    pass
             log.error(f"[mcp] Connection failed for {name}: {exc}")
+            log.warning(f"[mcp] Falling back to STUB for {name} due to error")
+            self.connections[name] = _StubMCPConnection(name)
+            self.health_status[name] = "stub"
 
     async def reconnect(self, name: str) -> None:
         """Reconnect a failed or disconnected server."""
@@ -149,44 +182,39 @@ class MCPConnectionManager:
         # Idempotency check
         if idempotent:
             idem_key = self._make_idem_key(server, tool, args)
-            if idem_key in self._call_log:
+            if idem_key in self._idempotency_cache:
                 log.info(f"[mcp] Idempotency hit — skipping duplicate call: {tool}")
-                cached = self._call_cache.get(idem_key, {})
-                # Return with idempotency_hit flag so the agent tool loop can break early
-                if isinstance(cached, dict):
-                    return {**cached, "idempotency_hit": True}
-                return {"result": cached, "idempotency_hit": True}
+                cached = self._idempotency_cache[idem_key]
+                return {**cached, "idempotency_hit": True}
 
-        # Execute
         conn = self.connections.get(server)
-        if conn is None:
-            raise RuntimeError(f"No active connection for MCP server: {server}")
+        if not conn:
+            log.error(f"[mcp] No connection for {server}")
+            return {"error": f"No MCP connection for {server}"}
 
         log.info(f"[mcp] → {server}.{tool}({list(args.keys())})")
-        result = await conn.call_tool(tool, args)
+        try:
+            if isinstance(conn, _StubMCPConnection):
+                result = await conn.call_tool(tool, args)
+            else:
+                raw_result = await conn.call_tool(tool, arguments=args)
+                try:
+                    result = raw_result.model_dump()
+                except AttributeError:
+                    result = str(raw_result)
+        except Exception as exc:
+            log.error(f"[mcp] Tool call failed — {server}.{tool}: {exc}")
+            return {"error": str(exc)}
 
         # Cache result for idempotency
         if idempotent:
-            idem_key = self._make_idem_key(server, tool, args)
-            self._call_log.add(idem_key)
-            self._call_cache[idem_key] = result
+            self._idempotency_cache[idem_key] = result
 
         return result
-
-    def call_tool_for_agent(self, agent_name: str, tool: str, args: dict):
-        """Convenience: resolve agent → MCP server automatically."""
-        server = AGENT_MCP_MAP.get(agent_name)
-        if not server:
-            raise ValueError(f"No MCP server mapped for agent: {agent_name}")
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(
-            self.call_tool(server, tool, args)
-        )
 
     # ── Health ────────────────────────────────────────────────────────────────
 
     def get_health(self) -> dict[str, str]:
-        """Return health status for all servers (used by dashboard API)."""
         return dict(self.health_status)
 
     def is_healthy(self, server: str) -> bool:
@@ -200,22 +228,42 @@ class MCPConnectionManager:
         return hashlib.sha256(payload.encode()).hexdigest()
 
     async def close_all(self) -> None:
-        for name, conn in self.connections.items():
+        for name, stack in self.exit_stacks.items():
             try:
-                if hasattr(conn, "close"):
-                    await conn.close()
-                log.info(f"[mcp] Closed → {name}")
+                await stack.aclose()
+                log.info(f"[mcp] Closed stack → {name}")
             except Exception as exc:
                 log.warning(f"[mcp] Error closing {name}: {exc}")
+        for name, conn in self.connections.items():
+            if isinstance(conn, _StubMCPConnection):
+                try:
+                    await conn.close()
+                except Exception as exc:
+                    log.warning(f"[mcp] Error closing {name}: {exc}")
 
 
 # ── Stub connection (local dev / no mcp package) ──────────────────────────────
 
+# Tavily search_depth mapping: agent says "standard"/"shallow"/"deep" but
+# the Tavily REST API only accepts "basic" or "advanced".
+_DEPTH_MAP = {
+    "shallow": "basic",
+    "standard": "basic",
+    "deep": "advanced",
+    "basic": "basic",
+    "advanced": "advanced",
+}
+
+
 class _StubMCPConnection:
     """
     Stand-in MCP connection for local development without live API keys.
-    Returns realistic placeholder data so the full agent pipeline can be
-    exercised end-to-end without real external services.
+
+    For tavily-mcp: transparently routes search/fetch_url to the real
+    Tavily REST API via httpx (no mcp SDK required).
+
+    For all other servers: returns realistic placeholder data so the full
+    agent pipeline can be exercised end-to-end.
     """
 
     STUB_RESPONSES: dict[str, dict] = {
@@ -236,8 +284,85 @@ class _StubMCPConnection:
         self.server_name = server_name
 
     async def call_tool(self, tool: str, args: dict) -> dict:
+        # ── Unwrap nested "args" key that LLMs frequently hallucinate ──
+        if "args" in args and isinstance(args["args"], dict):
+            inner = args.pop("args")
+            args.update(inner)
+
+        # ── Tavily: transparent HTTP fallback ──────────────────────────
+        if self.server_name == "tavily-mcp":
+            api_key = os.environ.get("TAVILY_API_KEY")
+            if api_key:
+                return await self._tavily_http(tool, args, api_key)
+            else:
+                log.warning("[stub_mcp] TAVILY_API_KEY not set — using stub data")
+
+        # ── All other servers: return static stub data ─────────────────
         log.warning(f"[stub_mcp] {self.server_name}.{tool}({args}) → returning stub data")
         return self.STUB_RESPONSES.get(tool, {"status": "stub_ok", "tool": tool})
+
+    async def _tavily_http(self, tool: str, args: dict, api_key: str) -> dict:
+        """Direct HTTP calls to Tavily REST API — no MCP SDK needed."""
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                if tool == "search":
+                    query = args.get("query", "")
+                    raw_depth = args.get("depth", "basic")
+                    depth = _DEPTH_MAP.get(raw_depth, "basic")
+
+                    log.info(f"[tavily-http] /search query={query!r} depth={depth}")
+                    res = await client.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": api_key,
+                            "query": query,
+                            "search_depth": depth,
+                            "max_results": int(args.get("num_results", 5)),
+                            "include_raw_content": False,
+                        },
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        results = data.get("results", [])
+                        return {
+                            "results": [
+                                {
+                                    "title": r.get("title", ""),
+                                    "url": r.get("url", ""),
+                                    "snippet": r.get("content", ""),
+                                }
+                                for r in results
+                            ]
+                        }
+                    log.error(f"[tavily-http] search failed {res.status_code}: {res.text[:200]}")
+                    return {"error": f"Tavily search error: {res.status_code}"}
+
+                elif tool == "fetch_url":
+                    url = args.get("url", "")
+                    log.info(f"[tavily-http] /extract url={url}")
+                    res = await client.post(
+                        "https://api.tavily.com/extract",
+                        json={
+                            "api_key": api_key,
+                            "urls": [url],
+                        },
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        results = data.get("results", [])
+                        if results:
+                            return {"content": results[0].get("raw_content", "")[:3000]}
+                        return {"content": f"No content extracted from {url}"}
+                    log.error(f"[tavily-http] extract failed {res.status_code}: {res.text[:200]}")
+                    return {"error": f"Tavily extract error: {res.status_code}"}
+
+                else:
+                    log.warning(f"[tavily-http] Unknown tool {tool} — returning stub")
+                    return self.STUB_RESPONSES.get(tool, {"status": "stub_ok", "tool": tool})
+
+        except Exception as exc:
+            log.error(f"[tavily-http] Exception: {exc}")
+            return {"error": f"Tavily HTTP error: {exc}"}
 
     async def close(self):
         pass

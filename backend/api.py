@@ -49,6 +49,11 @@ orchestrator = MasterOrchestrator(
 # Active WebSocket connections: task_id → list[WebSocket]
 _ws_clients: dict[str, list[WebSocket]] = {}
 
+# Completed task results cache: task_id → result dict
+# This is the authoritative source — set by the _run_and_broadcast coroutine
+# and read by late-connecting WS clients.
+_task_results: dict[str, dict] = {}
+
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
@@ -66,7 +71,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="FRAME-MO API",
     description="Fault-Resilient Agentic Multi-Orchestral Engine — Dashboard API",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -113,10 +118,15 @@ async def start_task(req: StartTaskRequest):
     async def _run_and_broadcast():
         try:
             result = await orch.run(goal=req.goal, task_id=task_id)
+            # Cache the result BEFORE broadcasting so late WS clients always find it
+            _task_results[task_id] = result
             await _broadcast(task_id, {"event": "complete", "result": result})
+            await _broadcast(task_id, {"event": "terminal", "status": "complete"})
         except Exception as exc:
             log.error(f"[api] Task {task_id} failed: {exc}")
+            _task_results[task_id] = {"status": "failed", "error": str(exc)}
             await _broadcast(task_id, {"event": "error", "message": str(exc)})
+            await _broadcast(task_id, {"event": "terminal", "status": "failed"})
 
     asyncio.create_task(_run_and_broadcast())
     return {"task_id": task_id, "status": "started", "goal": req.goal}
@@ -132,6 +142,9 @@ async def get_task(task_id: str):
     status = orchestrator.get_live_status(task_id)
     if not status:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    # Merge cached result if available
+    if task_id in _task_results:
+        status["final_result"] = _task_results[task_id]
     return status
 
 
@@ -194,44 +207,26 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
     log.info(f"[ws] Client connected for task_id={task_id}")
 
     try:
-        # Send current state immediately on connect
-        status = orchestrator.get_live_status(task_id)
-        if status:
-            await websocket.send_text(json.dumps({"event": "status", **status}, default=str))
+        # ── Check if result is already cached (task finished before WS connected) ──
+        if task_id in _task_results:
+            cached = _task_results[task_id]
+            is_failed = cached.get("status") == "failed"
 
-            # If the task is already finished when the client connects (race condition),
-            # immediately re-send the complete/failed event with the full result so the
-            # frontend doesn't miss it.
-            if status.get("status") == "complete":
-                final_result = status.get("final_result") or {}
-                # For conversation tasks, synthesize result from direct_reply
-                if not final_result and status.get("direct_reply"):
-                    final_result = {
-                        "status": "complete",
-                        "intent_type": status.get("intent_type", "conversation"),
-                        "summary": status.get("direct_reply", ""),
-                        "highlights": [],
-                        "completed_agents": status.get("completed_agents", []),
-                        "agent_results": {},
-                        "error_log": [],
-                        "retry_counts": status.get("retry_counts", {}),
-                        "saga_log": status.get("saga_log", []),
-                        "task_id": task_id,
-                    }
-                await websocket.send_text(json.dumps(
-                    {"event": "complete", "result": final_result}, default=str
-                ))
-                await websocket.send_text(json.dumps(
-                    {"event": "terminal", "status": "complete"}
-                ))
-                return
+            # Send a status snapshot first
+            status = orchestrator.get_live_status(task_id)
+            if status:
+                await websocket.send_text(json.dumps({"event": "status", **status}, default=str))
 
-            elif status.get("status") == "failed":
-                await websocket.send_text(json.dumps({"event": "error", "message": "Task failed"}))
-                await websocket.send_text(json.dumps({"event": "terminal", "status": "failed"}))
-                return
+            if is_failed:
+                await websocket.send_text(json.dumps({"event": "error", "message": cached.get("error", "Task failed")}))
+            else:
+                await websocket.send_text(json.dumps({"event": "complete", "result": cached}, default=str))
 
-        # Keep connection alive — poll for status updates every second
+            await websocket.send_text(json.dumps({"event": "terminal", "status": "failed" if is_failed else "complete"}))
+            log.info(f"[ws] Sent cached result for task_id={task_id}")
+            return
+
+        # ── Live polling — task is still running ──
         while True:
             await asyncio.sleep(1)
             status = orchestrator.get_live_status(task_id)
@@ -239,11 +234,16 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                 await websocket.send_text(
                     json.dumps({"event": "status", **status}, default=str)
                 )
-            # Stop polling on terminal states — prevents infinite reconnect loop
-            if status and status.get("status") in ("complete", "failed"):
-                await websocket.send_text(
-                    json.dumps({"event": "terminal", "status": status.get("status")})
-                )
+
+            # If result appeared in cache while we were polling, deliver it
+            if task_id in _task_results:
+                cached = _task_results[task_id]
+                is_failed = cached.get("status") == "failed"
+                if is_failed:
+                    await websocket.send_text(json.dumps({"event": "error", "message": cached.get("error", "Task failed")}))
+                else:
+                    await websocket.send_text(json.dumps({"event": "complete", "result": cached}, default=str))
+                await websocket.send_text(json.dumps({"event": "terminal", "status": "failed" if is_failed else "complete"}))
                 break
 
     except WebSocketDisconnect:

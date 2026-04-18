@@ -504,14 +504,19 @@ class MasterOrchestrator:
         """
         log.info("[orchestrator] Aggregating results with Ollama...")
 
+        # Build a content-focused prompt that includes the actual data
+        agent_data_str = json.dumps(state.agent_results, indent=2, default=str)
+
         summary_prompt = (
             f"You have completed a multi-agent task.\n\n"
             f"Original goal: {state.goal}\n\n"
-            f"Agent results:\n{json.dumps(state.agent_results, indent=2)}\n\n"
-            f"Write a concise 3-5 sentence summary of what was accomplished, "
-            f"what each agent did, and any notable outcomes. "
+            f"Agent results:\n{agent_data_str}\n\n"
+            f"Write a comprehensive summary based on the ACTUAL DATA returned by the agents. "
+            f"Include specific facts, numbers, headlines, and details from the results. "
+            f"Do NOT write a meta-description of what agents did — write the actual answer "
+            f"the user was looking for.\n\n"
             f"Respond ONLY with valid JSON:\n"
-            f'{{"status":"complete","goal":"...","summary":"...","highlights":[...]}}'
+            f'{{"status":"complete","goal":"...","summary":"<detailed answer with actual data>","highlights":["<specific fact 1>","<specific fact 2>","..."]}}'
         )
 
         response = self.client.chat.completions.create(
@@ -521,7 +526,7 @@ class MasterOrchestrator:
                 {"role": "user", "content": summary_prompt}
             ],
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=2048,
         )
 
         raw_text = response.choices[0].message.content or "{}"
@@ -535,9 +540,17 @@ class MasterOrchestrator:
             final = {
                 "status": "complete",
                 "goal": state.goal,
-                "summary": raw_text[:500],
+                "summary": raw_text[:1000],
                 "highlights": [],
             }
+
+        # Ensure summary is not empty — fall back to agent results directly
+        if not final.get("summary") or len(final["summary"]) < 20:
+            # Pull summary from agent results if the LLM failed
+            for agent_name, result in state.agent_results.items():
+                if isinstance(result, dict) and result.get("summary"):
+                    final["summary"] = result["summary"]
+                    break
 
         final["task_id"] = state.task_id
         final["intent_type"] = state.intent_type
@@ -548,6 +561,15 @@ class MasterOrchestrator:
         final["saga_log"] = state.saga_log
         final["pei_violations"] = state.pei_violations
         final["completed_at"] = datetime.utcnow().isoformat()
+
+        # Extract and promote research sources/key_facts for frontend display
+        for agent_name, result in state.agent_results.items():
+            if isinstance(result, dict):
+                if result.get("sources") and "sources" not in final:
+                    final["sources"] = result["sources"]
+                if result.get("key_facts") and "key_facts" not in final:
+                    final["key_facts"] = result["key_facts"]
+
         return final
 
     # ── Agent dispatch ────────────────────────────────────────────────────────
