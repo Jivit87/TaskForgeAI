@@ -249,6 +249,19 @@ class ConversationMemory:
         ).fetchone()
         return row[0] if row else 0
 
+    # ── Cleanup ──────────────────────────────────────────────────────────────
+
+    def delete_task(self, task_id: str) -> None:
+        """Delete all memory records associated with a specific task_id."""
+        self.conn.execute(
+            "DELETE FROM conversation_turns WHERE task_id = ?", (task_id,)
+        )
+        self.conn.execute(
+            "DELETE FROM task_episodes WHERE task_id = ?", (task_id,)
+        )
+        self.conn.commit()
+        log.info(f"[memory] Deleted all records for task: {task_id}")
+
     # ── Context Builder ───────────────────────────────────────────────────────
 
     def build_context_messages(self) -> list[dict]:

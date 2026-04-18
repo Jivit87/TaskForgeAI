@@ -152,6 +152,16 @@ async def get_task(task_id: str):
     return status
 
 
+@app.delete("/tasks/{task_id}", summary="Delete task history")
+async def delete_task(task_id: str):
+    checkpoint.delete(task_id)
+    memory.delete_task(task_id)
+    # Also clean up cached results if present
+    if task_id in _task_results:
+        del _task_results[task_id]
+    return {"status": "deleted", "task_id": task_id}
+
+
 @app.post("/tasks/{task_id}/hitl", summary="Submit HITL approval decision")
 async def hitl_decision(task_id: str, req: HITLDecisionRequest):
     success = orchestrator.hitl.submit_decision(task_id, req.approved)

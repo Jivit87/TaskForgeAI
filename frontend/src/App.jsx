@@ -5,7 +5,7 @@ import {
   Plus, Search, User, Paperclip, ArrowUp, PanelLeftClose, PanelLeft,
   Database, Blocks, Settings, Code, Mail, FileText, CheckCircle2,
   Loader2, AlertCircle, XCircle, RefreshCw, Workflow,
-  ChevronDown, ChevronRight, ShieldAlert, Undo2
+  ChevronDown, ChevronRight, ShieldAlert, Undo2, Trash2
 } from 'lucide-react';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -511,6 +511,21 @@ const App = () => {
     setMessages([{ role: 'user', content: session.goal_preview }]);
   };
 
+  const handleDeleteSession = async (e, taskId) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/tasks/${taskId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setSessions(prev => prev.filter(s => s.task_id !== taskId));
+        if (activeTaskId === taskId) {
+          startNewChat();
+        }
+      }
+    } catch (err) {
+      console.error("Failed to delete session:", err);
+    }
+  };
+
   // ── Derived ─────────────────────────────────────────────────────────────────
 
   const isBlocked = !!activeTaskId || isSubmitting;
@@ -543,15 +558,29 @@ const App = () => {
 
           <div className="flex-1 overflow-y-auto mt-2 px-3">
             <div className="text-[11px] font-semibold text-slate-500 px-2 mb-2 tracking-wider">Recent Chats</div>
-            {sessions.map((s) => (
-              <button
-                key={s.task_id}
-                onClick={() => handleSessionClick(s)}
-                className="w-full text-left px-3 py-2 text-sm rounded-md transition-colors mb-0.5 hover:bg-[#ebebeb]"
-              >
-                <p className="truncate text-slate-700 max-w-[200px]">{s.goal_preview}</p>
-              </button>
-            ))}
+            {sessions.map((s) => {
+              const isActive = activeTaskId === s.task_id;
+              return (
+                <div
+                  key={s.task_id}
+                  onClick={() => handleSessionClick(s)}
+                  className={`group flex items-center justify-between px-3 py-2 text-sm rounded-md transition-all mb-0.5 cursor-pointer border border-transparent ${
+                    isActive
+                      ? 'bg-white shadow-sm border-slate-200 text-[#d97757] font-medium'
+                      : 'hover:bg-black/5 text-slate-600'
+                  }`}
+                >
+                  <p className="truncate flex-1 pr-2">{s.goal_preview}</p>
+                  <button
+                    onClick={(e) => handleDeleteSession(e, s.task_id)}
+                    className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-1.5 text-slate-400 hover:text-red-600 hover:bg-white rounded-md shadow-sm border border-transparent hover:border-slate-200 transition-all scale-95 hover:scale-100"
+                    title="Delete chat"
+                  >
+                    <Trash2 size={14} strokeWidth={2.5} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
 
           <div className="p-3 border-t border-[#e5e5e5] flex flex-col gap-1">
