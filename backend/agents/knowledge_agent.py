@@ -22,20 +22,20 @@ WRITE_ACTIONS = {"create", "append", "delete"}
 
 class KnowledgeAgent(BaseAgent):
     agent_name = "knowledge_agent"
-    agent_description = "Notion workspace: read, create, and append pages"
+    agent_description = "Notion workspace: read pages, search databases, create and append pages"
     mcp_server = "notion-mcp"
     tool_names  = [
-        "read_notion_page",
-        "create_notion_page",
-        "append_notion_block",
-        "search_notion",
+        "API-retrieve-a-page",
+        "API-post-page",
+        "API-patch-block-children",
+        "API-post-search",
         "summarize_content",
         "extract_structured_data",
     ]
     routing_parameters = {
         "type": "object",
         "properties": {
-            "action":      {"type": "string", "enum": ["read", "create", "append"]},
+            "action":      {"type": "string", "enum": ["read", "create", "append", "search_databases", "search_notion"]},
             "page_id":     {"type": "string", "description": "Notion page ID"},
             "title":       {"type": "string", "description": "Page title"},
             "content":     {"type": "string", "description": "Markdown content"},

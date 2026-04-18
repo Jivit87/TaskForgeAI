@@ -91,13 +91,11 @@ def notion_mcp_config() -> dict:
     Used by: Knowledge Sub-Agent
     """
     return {
-        "type": "url",
-        "url": "https://mcp.notion.com/mcp",
-        "name": "notion-mcp",
-        "headers": {
-            "Authorization": f"Bearer {os.environ.get('NOTION_TOKEN', '')}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@notionhq/notion-mcp-server"],
+        "env": {
+            "NOTION_TOKEN": os.environ.get("NOTION_TOKEN", ""),
         },
         "capabilities": [
             "read_notion_page",

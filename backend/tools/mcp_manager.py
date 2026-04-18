@@ -24,38 +24,9 @@ log = logging.getLogger("frame_mo.mcp_manager")
 # ── MCP server configurations ─────────────────────────────────────────────────
 
 def _load_mcp_configs() -> dict[str, dict]:
-    """Build MCP server configs from environment variables."""
-    return {
-        "gmail-mcp": {
-            "type": "url",
-            "url": "https://gmailmcp.googleapis.com/mcp/v1",
-            "name": "gmail-mcp",
-        },
-        "github-mcp": {
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {
-                "GITHUB_PERSONAL_ACCESS_TOKEN": os.environ.get(
-                    "GITHUB_PERSONAL_ACCESS_TOKEN", ""
-                )
-            },
-        },
-        "notion-mcp": {
-            "type": "url",
-            "url": "https://mcp.notion.com/mcp",
-            "name": "notion-mcp",
-            "headers": {
-                "Authorization": f"Bearer {os.environ.get('NOTION_TOKEN', '')}",
-            },
-        },
-        "tavily-mcp": {
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "@tavily/mcp-server"],
-            "env": {"TAVILY_API_KEY": os.environ.get("TAVILY_API_KEY", "")},
-        },
-    }
+    """Build MCP server configs from centralized config module."""
+    from config.mcp_configs import get_all_mcp_configs
+    return get_all_mcp_configs()
 
 
 # ── Agent → MCP server mapping ────────────────────────────────────────────────
